@@ -1,7 +1,7 @@
 # ARCQuant: Boosting Fine-Grained Quantization with Augmented Residual Channels for LLMs
 
 
-**ARCQuant** is a high-performance quantization framework designed to resolve the conflict between **accuracy** and **inference efficiency** in low-bit LLMs (e.g., 4-bit).
+**ARCQuant** is a high-performance quantization framework designed to resolve the conflict between **accuracy** and **inference efficiency** in low-bit LLMs.
 
 While fine-grained quantization (e.g., Block-wise/NVFP4) effectively isolates quantization noise, **activation outliers** still degrade performance in critical channels. Traditional mixed-precision methods address this by splitting computations into separate branches (INT4 + FP16), which introduces significant kernel launch overhead and memory fragmentation.
 
@@ -11,7 +11,7 @@ While fine-grained quantization (e.g., Block-wise/NVFP4) effectively isolates qu
 
 *   **Unified Single-Kernel Execution:** By converting error compensation into channel augmentation, ARCQuant performs the entire inference using a **single, standard GEMM kernel**. This decouples the algorithm from complex custom operators and allows full utilization of optimized libraries like **CUTLASS**.
 *   **Accuracy-Aware Compensation:** Powered by a rigorous analysis of error bounds, ARCQuant identifies and compensates only the most critical "heavy-hitter" channels, recovering **FP16-level accuracy** with negligible computational cost.
-*   **Hardware-Friendly Design:** Designed for modern GPU architectures (Ampere/Hopper/Blackwell), ARCQuant eliminates the bottleneck of integer dequantization on CUDA cores, making it a future-proof solution for native floating-point quantization (FP4/FP8).
+*   **Hardware-Friendly Design:** Designed for modern GPU architectures, ARCQuant eliminates the bottleneck of integer dequantization on CUDA cores, making it a future-proof solution for native floating-point quantization.
 
 ### 📊 Performance
 On Llama-3 and Qwen-2.5 models, ARCQuant achieves **state-of-the-art accuracy** while delivering significantly lower latency compared to traditional mixed-precision baselines.
