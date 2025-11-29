@@ -1,0 +1,6 @@
+[submodule "third-party/cutlass"]
+	path = third-party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
+[submodule "third-party/flashinfer"]
+	path = third-party/flashinfer
+	url = https://github.com/flashinfer-ai/flashinfer.git
