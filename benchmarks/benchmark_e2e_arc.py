@@ -134,7 +134,7 @@ def module_benchmark(module):
 
 
 def get_model_quantized(name, model_cfg):
-    from modeling_aura import LlamaConfig, LlamaForCausalLM
+    from modeling_arc import LlamaConfig, LlamaForCausalLM
     model = LlamaForCausalLM(
         name,
         LlamaConfig(
@@ -217,14 +217,14 @@ def benchmark(args):
     del model
     _cleanup()
 
-    print(f"Prefill AURA time: {np.mean(time_prefill_i4):.3f} +- {1.96 * np.std(time_prefill_i4):.3f}ms")
+    print(f"Prefill time: {np.mean(time_prefill_i4):.3f} +- {1.96 * np.std(time_prefill_i4):.3f}ms")
     print('--------------')
     if args.decode_steps is not None:
-        print(f"Decode AURA time: {np.mean(time_decode_i4):.3f} +- {1.96 * np.std(time_decode_i4):.3f}ms")
-        print(f"E2E AURA time: {np.mean(time_e2e_i4):.3f} +- {1.96 * np.std(time_e2e_i4):.3f}ms")
+        print(f"Decode time: {np.mean(time_decode_i4):.3f} +- {1.96 * np.std(time_decode_i4):.3f}ms")
+        print(f"E2E time: {np.mean(time_e2e_i4):.3f} +- {1.96 * np.std(time_e2e_i4):.3f}ms")
         print('--------------')
     
-    print(f"AURA memory: {np.mean(mem_i4) / (1024 * 1024 * 1024):.3f}GB +- {1.96 * np.std(mem_i4):.3f}")
+    print(f"Memory: {np.mean(mem_i4) / (1024 * 1024 * 1024):.3f}GB +- {1.96 * np.std(mem_i4):.3f}")
 
 
 if __name__ == '__main__':

@@ -11,6 +11,8 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import math
+import torch.nn.functional as F
+from sklearn.cluster import KMeans
 import sys
 from model.quantize import *
 from model.kv_cache import *
@@ -88,7 +90,7 @@ def get_act_stats(model, dataloader, device_, metric='mean', seqlen=2048, reorde
             tensorH = math.sqrt(2 / nsamples) * tensor.float().t()
             comming_H = tensorH.matmul(tensorH.t())
             comming_scales = torch.diag(comming_H)
-        elif metric == 'frobenius':
+        elif metric == 'score':
             if reorder_index is not None:
                 tensor = torch.index_select(tensor, 1, reorder_index)
                     
@@ -274,43 +276,71 @@ def get_wikitext2(nsamples, seed, seqlen, tokenizer):
 def get_c4(nsamples, seed, seqlen, tokenizer):
     from datasets import load_dataset
     import random
+    import torch
 
-    dataset = load_dataset(
+    traindata = load_dataset(
         'allenai/c4', 'en', 
-        split='train', 
-        streaming=True, 
+        split='validation', 
         trust_remote_code=True
     )
     
-    shuffled_dataset = dataset.shuffle(buffer_size=10000, seed=seed)
+    random.seed(seed)
+    trainloader = []
+    inps = []
+    
+    for _ in range(nsamples):
+        while True:
+            i = random.randint(0, len(traindata) - 1)
+            text = traindata[i]['text']
+            
+            encoded = tokenizer(text, return_tensors='pt')
+            
+            if encoded.input_ids.shape[1] >= seqlen:
+                i = random.randint(0, encoded.input_ids.shape[1] - seqlen - 1)
+                inp = encoded.input_ids[:, i : i + seqlen]
+                break
+        
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+        inps.append(inp)
+        
+    return trainloader, inps
+
+def get_pile(nsamples, seed, seqlen, tokenizer):
+    from datasets import load_dataset
+    import random
+    
+    try:
+        dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+    except:
+        print("Falling back to pile-10k")
+        dataset = load_dataset("NeelNanda/pile-10k", split="train")
+
+    dataset = dataset.shuffle(seed=seed)
 
     trainloader = []
     inps = []
-    for data in shuffled_dataset:
-        if len(inps) == nsamples:
+    
+    for data in dataset:
+        if len(trainloader) == nsamples:
             break
-
-        text = data.get('text', '')
-        if not text:
-            continue
-
+            
+        text = data['text']
         enc = tokenizer(text, return_tensors='pt')
-
+        
         if enc.input_ids.shape[1] >= seqlen:
             i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
             j = i + seqlen
             inp = enc.input_ids[:, i:j]
+            
             tar = inp.clone()
-            tar[:, :-1] = -100
+            tar[:, :-1] = -100 # Mask out context
             
             trainloader.append((inp, tar))
             inps.append(inp)
             
-    if len(inps) < nsamples:
-        print(f"warning: only get {len(inps)} samples >= {seqlen} ")
-
     return trainloader, inps
-
 
 def get_humaneval(nsamples, seed, seqlen, tokenizer):
     import random
@@ -353,301 +383,143 @@ def get_humaneval(nsamples, seed, seqlen, tokenizer):
 
     return trainloader, inps
 
-# @torch.no_grad()
-# def search_select_proportions(model, act_scales, select_ratio=0.06):
-#     """
-#     根据激活值大小，在同类层之间全局选择重要通道，并为每个层分配选择数量。
-
-#     Args:
-#         model (nn.Module): The transformer model.
-#         act_scales (dict): 字典，key为 "layer_name.input"，value为对应激活值的统计张量。
-#         select_ratio (float): 在每类层的通道池中，要选择的重要通道的全局比例。
-
-#     Returns:
-#         tuple: (select_nums, average_bits)
-#             - select_nums (dict): 每个线性层输入应选择的通道数量。
-#             - average_bits (dict): 每个线性层输入对应的预估平均比特。
-#     """
-#     # 最终返回的结果字典
-#     select_nums = {}
-#     average_bits = {}
-
-#     # 1. 按类型对所有线性层进行分组
-#     # key: 'q_proj', 'down_proj', etc.
-#     # value: list of (layer_name, module) tuples
-#     layer_groups = defaultdict(list)
-#     for name, m in model.model.named_modules():
-#         if isinstance(m, nn.Linear):
-#             # 获取层的类型，例如 'q_proj'
-#             layer_type = name.split('.')[-1]
-#             layer_groups[layer_type].append((name, m))
-
-#     # 2. 对每个分组进行处理
-#     for layer_type, layers_in_group in layer_groups.items():
-#         # 2.1. 建立当前分组的通道池
-#         # channel_pool 是一个列表，每个元素是 (scale_value, layer_name, channel_index)
-#         channel_pool = []
-#         total_channels_in_group = 0
-
-#         for layer_name, m in layers_in_group:
-#             dict_key = layer_name + ".input"
-#             if dict_key not in act_scales:
-#                 print(f"警告: 在 act_scales 中找不到 {dict_key} 的键，跳过此层。")
-#                 continue
-            
-#             scales = act_scales[dict_key]
-#             in_features = m.in_features
-#             assert len(scales) == in_features, f"{layer_name} 的特征数量与 scale 长度不匹配!"
-
-#             total_channels_in_group += in_features
-            
-#             # 将每个通道的 scale 值、来源层和索引存入池中
-#             for i in range(in_features):
-#                 channel_pool.append((scales[i].item(), layer_name, i))
-        
-#         if not channel_pool:
-#             continue
-
-#         # 2.2. 全局排序与选择
-#         # 按 scale 值从大到小排序
-#         channel_pool.sort(key=lambda x: x[0], reverse=True)
-
-#         # 确定要选择的通道总数
-#         num_to_select = int(total_channels_in_group * select_ratio)
-        
-#         # 选出最重要的通道
-#         selected_channels = channel_pool[:num_to_select]
-
-#         # 2.3. 统计每个层的被选中通道数量
-#         layer_selection_counts = defaultdict(int)
-#         for scale, layer_name, channel_idx in selected_channels:
-#             layer_selection_counts[layer_name] += 1
-            
-#         # 2.4. 为组内的每个层计算最终的 select_num 和 average_bits
-#         for layer_name, m in layers_in_group:
-#             in_features = m.in_features
-#             dict_key = layer_name + ".input"
-
-#             # 获取该层被选中的原始通道数
-#             raw_select_count = layer_selection_counts[layer_name] # 如果没有被选中的，默认为0
-
-#             # 向上取整到64的倍数
-#             final_select_num = math.ceil(raw_select_count / 64) * 64
-#             # 确保选择数量不超过总特征数
-#             final_select_num = min(final_select_num, in_features)
-
-#             select_nums[dict_key] = final_select_num
-
-#             # 基于最终确定的选择数量，计算该层的实际选择比例和平均比特
-#             if in_features > 0:
-#                 actual_ratio_for_layer = final_select_num / in_features
-#             else:
-#                 actual_ratio_for_layer = 0.0
-
-#             average_bits[dict_key] = 9 * actual_ratio_for_layer + 4.5 * (1.0 - actual_ratio_for_layer)
-
-#             print(f"{layer_name}: {(actual_ratio_for_layer*100):.2f}%")
-    
-#     return select_nums, average_bits
 
 # @torch.no_grad()
 # def search_select_proportions(
 #     model, 
-#     act_scales, 
-#     select_ratio=0.06,
-#     epsilon=1e-8  # 用于防止标准差为0时除法错误
+#     act_scores, 
+#     select_ratio=0.05,
+#     group_size=64,  # 硬件对齐要求
+#     epsilon=1e-8
 # ):
-#     """
-#     基于“Z-score局部归一化，全局贪心”的策略来自适应分配重要通道。
-#     1. 计算每个层类型（池）中激活值的均值和标准差。
-#     2. 对每个通道计算其Z-score = (value - mean) / (std + epsilon)。
-#     3. 将所有通道的Z-score放入一个全局池中。
-#     4. 贪心选择Z-score最高的通道，直到达到总预算。
-#     """
 #     select_nums = {}
 #     average_bits = {}
-
-#     # --- 阶段1：分组，计算统计量，并构建全局竞争池 ---
-
-#     layer_groups = defaultdict(list)
+    
+#     all_linear_layers = []
 #     total_model_channels = 0
-    
-#     # 1.1. 分组，同时将所有scales收集起来，方便后续计算统计量
-#     pool_scales_tensors = defaultdict(list)
 #     for name, m in model.model.named_modules():
 #         if isinstance(m, nn.Linear):
-#             layer_type = name.split('.')[-1]
-#             layer_groups[layer_type].append((name, m))
+#             all_linear_layers.append((name, m))
 #             total_model_channels += m.in_features
-            
-#             dict_key = name + ".input"
-#             if dict_key in act_scales:
-#                 # 收集tensor，而不是展平的list，方便用torch计算
-#                 pool_scales_tensors[layer_type].append(act_scales[dict_key])
-#             else:
-#                 print(f"警告: 在 act_scales 中找不到 {dict_key} 的键。")
+    
+#     # 1. 计算全局预算（以 Block 为单位）
+#     # 向下取整，确保严格不超预算
+#     total_budget_channels = int(total_model_channels * select_ratio)
+#     total_budget_blocks = total_budget_channels // group_size
+    
+#     global_block_pool = []
+    
+#     print(f"Global Budget: {total_budget_channels} channels (~{total_budget_blocks} blocks of {group_size})")
 
-#     # 1.2. 计算每个池的均值和标准差
-#     pool_stats = {}
-#     for layer_type, tensor_list in pool_scales_tensors.items():
-#         if not tensor_list:
-#             continue
-#         # 将一个池中所有层的scales拼接成一个大的一维张量
-#         full_pool_tensor = torch.cat(tensor_list)
-#         mean = torch.mean(full_pool_tensor).item()
-#         std = torch.std(full_pool_tensor).item()
-#         pool_stats[layer_type] = {'mean': mean, 'std': std}
-
-#     # 1.3. 构建全局竞争池，存储 (z_score, layer_name, channel_index)
-#     global_competition_pool = []
-#     for layer_type, layers_in_group in layer_groups.items():
-#         if layer_type not in pool_stats:
-#             continue
+#     for layer_name, m in all_linear_layers:
+#         dict_key = layer_name + ".input"
+#         in_features = m.in_features
         
-#         stats = pool_stats[layer_type]
-#         mean = stats['mean']
-#         std = stats['std']
+#         # 如果某层连一个 group 都凑不齐，直接跳过（很少见，但为了代码健壮性）
+#         if in_features < group_size:
+#             select_nums[dict_key] = 0
+#             average_bits[dict_key] = 4.5 # 假设全低比特
+#             continue
             
-#         for layer_name, m in layers_in_group:
-#             dict_key = layer_name + ".input"
-#             if dict_key in act_scales:
-#                 scales = act_scales[dict_key]
-#                 for i in range(len(scales)):
-#                     original_scale = scales[i].item()
-#                     # 计算Z-score
-#                     z_score = (original_scale - mean) / (std + epsilon)
-#                     global_competition_pool.append((z_score, layer_name, i))
+#         if dict_key in act_scores:
+#             scales = act_scores[dict_key]
+            
+#             if not isinstance(scales, torch.Tensor):
+#                 scales = torch.tensor(scales)
+            
+#             # --- 归一化 ---
+#             # 依然除以中位数，保持你的相对误差逻辑
+#             if scales.numel() > 1:
+#                 threshold = torch.quantile(scales ** 2, 0.50)
+#                 # threshold = 1.0
+#             else: 
+#                 threshold = scales.item() + epsilon
+            
+#             if threshold == 0: threshold = epsilon
+            
+#             normalized_scores = (scales ** 2) / threshold
 
-#     # --- 阶段2：全局排序与选择 ---
+#             # --- 关键修改：从后往前切片 ---
+#             # 我们不需要排序，因为你说了顺序已经固定，后面的是重要的。
+#             # 我们只需要评估“倒数第1个组”、“倒数第2个组”...的价值。
+            
+#             # 该层最多能切出多少个完整的 64 通道组
+#             max_blocks = in_features // group_size
+            
+#             for i in range(max_blocks):
+#                 # i=0: 最后64个 (in_features-64 : in_features)
+#                 # i=1: 倒数65-128个 (in_features-128 : in_features-64)
+                
+#                 end_idx = in_features - i * group_size
+#                 start_idx = end_idx - group_size
+                
+#                 # 获取这一段的分数
+#                 block_scores = normalized_scores[start_idx : end_idx]
+                
+#                 # 计算该 Block 的总价值 (Sum of relative errors)
+#                 # 这代表了“如果我投入64个通道的显存预算，我能挽回多少相对误差”
+#                 block_value = block_scores.sum().item()
+                
+#                 # 加入全局竞争池
+#                 # 只需要记录分数和层名。不需要记录是第几组，因为最后我们只统计每层中了几个组。
+#                 global_block_pool.append((block_value, layer_name))
 
-#     # 2.1. 按Z-score从大到小排序
-#     global_competition_pool.sort(key=lambda x: x[0], reverse=True)
+#     # --- 2. 全局排序 & 截断 ---
+#     # 按照 Block 价值从大到小排序
+#     global_block_pool.sort(key=lambda x: x[0], reverse=True)
     
-#     # 2.2. 确定要选择的总通道数
-#     total_budget_to_select = int(total_model_channels * select_ratio)
-    
-#     # 2.3. 选出Z-score最高的通道
-#     selected_channels = global_competition_pool[:total_budget_to_select]
+#     # 选出前 N 个最有价值的 Block
+#     selected_blocks = global_block_pool[:total_budget_blocks]
 
-#     print(f"threshold is {global_competition_pool[-total_budget_to_selsect]}, max is {global_competition_pool[-1]}")
-    
-#     # --- 阶段3：统计与收尾 ---
-    
-#     # 3.1. 统计每个层的被选中通道数量
-#     layer_selection_counts = defaultdict(int)
-#     for _, layer_name, _ in selected_channels:
-#         layer_selection_counts[layer_name] += 1
+#     # --- 3. 统计结果 ---
+#     layer_win_counts = defaultdict(int)
+#     for _, layer_name in selected_blocks:
+#         layer_win_counts[layer_name] += 1
         
-#     # 3.2. 遍历所有层，计算最终的 select_num 和 average_bits
-#     for layer_type, layers_in_group in layer_groups.items():
-#         for layer_name, m in layers_in_group:
-#             in_features = m.in_features
-#             dict_key = layer_name + ".input"
-            
-#             raw_select_count = layer_selection_counts.get(layer_name, 0) # 使用.get确保安全
-#             final_select_num = math.ceil(raw_select_count / 64) * 64
-#             final_select_num = min(final_select_num, in_features)
-            
-#             select_nums[dict_key] = final_select_num
-            
-#             actual_ratio_for_layer = final_select_num / in_features if in_features > 0 else 0
-#             average_bits[dict_key] = 9 * actual_ratio_for_layer + 4.5 * (1.0 - actual_ratio_for_layer)
-#             print(f"{layer_name}: {(actual_ratio_for_layer*100):.2f}%")
+#     total_selected_actual = 0
+    
+#     for layer_name, m in all_linear_layers:
+#         dict_key = layer_name + ".input"
+#         in_features = m.in_features
+        
+#         # 该层赢得了多少个 Block
+#         wins = layer_win_counts.get(layer_name, 0)
+        
+#         # 转换为通道数 (必然是 64 的倍数)
+#         final_select_num = wins * group_size
+        
+#         # 记录结果
+#         select_nums[dict_key] = final_select_num
+#         total_selected_actual += final_select_num
+        
+#         # 计算平均 bit
+#         actual_ratio = final_select_num / in_features if in_features > 0 else 0
+#         # 假设选中部分占用相当于 9 bit (或你的实际开销)，未选中是 4.5 bit
+#         average_bits[dict_key] = 9 * actual_ratio + 4.5 * (1.0 - actual_ratio)
+        
+#         print(f"{layer_name}: {final_select_num} ({actual_ratio*100:.2f}%)")
+
+#     # 打印最终统计
+#     if len(global_block_pool) > total_budget_blocks:
+#         print(f"\nThreshold Score: {global_block_pool[total_budget_blocks][0]:.4f}")
+    
+#     print(f"Target Ratio: {select_ratio*100:.2f}%")
+#     print(f"Actual Ratio: {(total_selected_actual/total_model_channels)*100:.2f}%")
 
 #     return select_nums, average_bits
 
-@torch.no_grad()
-def search_select_proportions(
-    model, 
-    act_scores, 
-    select_ratio=0.06,
-    epsilon=1e-8  # 用于防止标准差为0时除法错误
-):
-    """
-    最终版：基于“逐层Z-score归一化，全局贪心”的策略。
-    1. 为每一个独立的线性层（如 layer.0.q_proj, layer.31.q_proj）计算其私有的均值和标准差。
-    2. 对每个通道计算其相对于自身所在层的Z-score。
-    3. 将所有通道的局部Z-score放入一个全局池中进行排序和选择。
-    """
-    select_nums = {}
-    average_bits = {}
-    
-    all_linear_layers = []
-    total_model_channels = 0
-    for name, m in model.model.named_modules():
-        if isinstance(m, nn.Linear):
-            all_linear_layers.append((name, m))
-            total_model_channels += m.in_features
-
-    # --- 阶段1：逐层计算Z-score并构建全局竞争池 ---
-    
-    global_competition_pool = []
-    
-    for layer_name, m in all_linear_layers:
-        dict_key = layer_name + ".input"
-        
-        if dict_key in act_scores:
-            scales = act_scores[dict_key]
-            
-            # 确保scales是tensor
-            if not isinstance(scales, torch.Tensor):
-                scales = torch.tensor(scales)
-                
-            if scales.numel() > 1:
-                # 为当前这一个层计算其私有的均值和标准差
-                # mean = torch.mean(scales).item()
-                mean = torch.quantile(scales, 0.95)
-                std = torch.std(scales).item()
-            else: # 如果只有一个通道，无法计算标准差
-                mean = scales.item()
-                std = 0
-
-            for i in range(len(scales)):
-                original_scale = scales[i].item()
-                # 计算相对于本层的Z-score
-                # z_score = (original_scale - mean) / (std + epsilon)
-                z_score = original_scale / mean
-                global_competition_pool.append((z_score, layer_name, i))
-
-    # --- 阶段2：全局排序与选择 ---
-
-    global_competition_pool.sort(key=lambda x: x[0], reverse=True)
-    
-    total_budget_to_select = int(total_model_channels * select_ratio)
-    selected_channels = global_competition_pool[:total_budget_to_select]
-
-    print(f"threshold is {global_competition_pool[total_budget_to_select]}, max is {global_competition_pool[1]}")
-    
-    # --- 阶段3：统计与收尾 ---
-    
-    layer_selection_counts = defaultdict(int)
-    for _, layer_name, _ in selected_channels:
-        layer_selection_counts[layer_name] += 1
-        
-    for layer_name, m in all_linear_layers:
-        in_features = m.in_features
-        dict_key = layer_name + ".input"
-        
-        raw_select_count = layer_selection_counts.get(layer_name, 0)
-        final_select_num = math.ceil(raw_select_count / 64) * 64
-        final_select_num = min(final_select_num, in_features)
-        
-        select_nums[dict_key] = final_select_num
-        
-        actual_ratio_for_layer = final_select_num / in_features if in_features > 0 else 0
-        average_bits[dict_key] = 9 * actual_ratio_for_layer + 4.5 * (1.0 - actual_ratio_for_layer)
-        print(f"{layer_name}: {(actual_ratio_for_layer*100):.2f}%")
-
-    return select_nums, average_bits
 
 # def search_select_proportions(
 #     model, 
 #     act_scales, 
-#     select_ratio=0.06,
+#     select_ratio=1.0,
 #     epsilon=1e-8  # 用于防止标准差为0时除法错误
 # ):
 #     select_nums = {}
 #     average_bits = {}
+#     group_size = 16
+#     align_size = 64
+#     select_ratio = 1.0
 
 #     for name, m in model.model.named_modules():
 #         if 'output' in name:
@@ -655,12 +527,143 @@ def search_select_proportions(
 #         if isinstance(m, nn.Linear):
 #             in_features = m.in_features
             
-#             select_num = math.ceil(in_features * select_ratio / 64) * 64
+#             # select_num = round(in_features * select_ratio / 64) * 64
             
 #             dict_key = name + ".input"
             
-#             average_bits[dict_key] = 9 * select_ratio + 4.5 * (1.0 - select_ratio)
+#             scales = act_scales[dict_key]
+#             scales, sorted_index = torch.sort(scales, descending=False)
+#             if not isinstance(scales, torch.Tensor):
+#                 scales = torch.tensor(scales)
+
+#             print(f"max value is {scales[-1]}")
+#             threshold = scales[-1] / 4
+
+#             group_max_values = scales[group_size-1::group_size]
+#             count = (group_max_values > threshold).sum().item()
+#             select_num = round(count / 4) * align_size 
+
+#             actual_ratio = select_num / in_features
+#             average_bits[dict_key] = 9 * actual_ratio + 4.5 * (1.0 - actual_ratio)
 #             select_nums[dict_key] = select_num
+            
+#             print(f"{name}: {select_num} ({actual_ratio*100:.2f}%)")
 
 
 #     return select_nums, average_bits
+    
+
+@torch.no_grad()
+def search_select_proportions(model, dataloader, device_, seqlen, reorder_index):
+    nsamples = len(dataloader)
+    device = device_
+    
+    select_nums = {}
+    average_bits = {}
+   
+    def stat_input_hook(m, x, y, name):
+        if isinstance(x, tuple):
+            x = x[0]
+            assert isinstance(x, torch.Tensor)
+        if isinstance(y, tuple):
+            y = y[0]
+            assert isinstance(y, torch.Tensor)
+        act_scales[name+".input"] = x
+        act_scales[name+".output"] = y
+     
+    hooks = []
+    for name, m in model.model.named_modules():
+        if isinstance(m, nn.Linear):
+            hooks.append(
+                m.register_forward_hook(
+                    functools.partial(stat_input_hook, name=name)
+                )
+            )
+
+    layers = model.model.layers
+    
+    model.to(device)
+    
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=device
+    )
+    cache = {'attention_mask': None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.self_attn = module.self_attn
+        def forward(self, inp, **kwargs):
+            cache['inps'] = inp
+            cache['attention_mask'] = kwargs['attention_mask']
+            cache['position_ids'] = kwargs['position_ids']
+            raise ValueError
+    layers[0] = Catcher(layers[0])
+
+    dataloader = torch.stack(dataloader, dim=0).squeeze(1)
+    
+    try:
+        model(torch.tensor(dataloader).to(device))
+    except ValueError:
+        pass
+    
+    
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+    model.cpu()
+
+    torch.cuda.empty_cache()
+
+    inps = cache['inps']
+  
+    attention_mask = cache['attention_mask']
+    position_ids = cache['position_ids']
+
+    total_elements = 0
+    total_bits = 0
+  
+    for i in tqdm(range(len(layers))):
+        act_scales = {}
+        layer = layers[i].to(device)
+  
+        inps = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
+       
+        for name, keys in act_scales.items():
+            if 'output' in name:
+                continue
+                
+            keys = keys.reshape(-1, keys.shape[-1]).contiguous()
+            seqlen, in_features = keys.shape 
+            keys = keys[:, reorder_index[name].to(torch.int32)]
+       
+            threshold = keys.max(dim=-1, keepdim=True)[0] * 0.125
+            
+     
+            select_ratio = (keys > threshold).sum() / keys.numel()
+            select_num = math.ceil(in_features * select_ratio / 64) * 64
+            select_ratio = select_num / in_features
+            average_bits[name] = 4.5 * (in_features + select_num) / in_features
+            total_elements += in_features
+            total_bits += 4.5 * (in_features + select_num)
+            print(f'{name}: {select_ratio*100:.2f}%, avg:{average_bits[name]:.2f}')
+            select_nums[name] = select_num
+            del keys
+            
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        
+        layer.cpu()
+        del act_scales
+        del layer
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    for h in hooks:
+        h.remove()
+        
+    print(f'average bits is {(total_bits / total_elements):.2f}')
+    return select_nums, average_bits
+

@@ -80,7 +80,7 @@ if __name__ == '__main__':
         help="Limit the number of examples in lm evaluation"
     )
     parser.add_argument(
-        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval"], 
+        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
         help="The calibration dataset to use."
     )
   

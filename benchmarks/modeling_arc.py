@@ -20,6 +20,7 @@ sys.path.append('./kernels/build/')
 import agemm
 sys.path.append('./model/')
 from kv_cache import *
+from quantize import *
 
 class QLinearLayer(nn.Module):
     __constants__ = ["in_features", "out_features"]
@@ -44,7 +45,8 @@ class QLinearLayer(nn.Module):
         else:
             self.register_parameter("bias", None)
         self.select_num = select_num
-    
+
+        self.scale = 1.0
         self.B = torch.zeros(out_features, (self.in_features+self.select_num)//2, dtype=torch.uint8, device='cuda')
         self.SFB = torch.ones(out_features * (self.in_features+self.select_num)//16, dtype=torch.uint8, device='cuda') * 127 
         self.reorder_index = torch.arange(self.in_features, dtype=torch.int16, device='cuda') 
@@ -52,8 +54,8 @@ class QLinearLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
     
         
-        A, SFA = x[:2]
-        y = agemm.matmul(A, self.B, SFA, self.SFB)
+        A, SFA, scale = x[:3]
+        y = agemm.matmul(A, self.B, SFA, self.SFB, scale * self.scale)
         if self.bias is not None:
             y = y + self.bias
         
@@ -108,7 +110,7 @@ class QLlamaMLP(nn.Module):
 
     def forward(self, x):   
         bsz, q_len = x[-2], x[-1]
-        return self.down_proj(agemm.reorder_quantize_x(self.act_fn(self.gate_proj(x)) * self.up_proj(x), self.down_proj.reorder_index, self.down_proj.select_num)).reshape(bsz, q_len, -1)
+        return self.down_proj(reorder_quantize_x(self.act_fn(self.gate_proj(x)) * self.up_proj(x), self.down_proj.reorder_index, self.down_proj.select_num)).reshape(bsz, q_len, -1)
 
 
     
@@ -207,8 +209,8 @@ class QLlamaAttention(LlamaFlashAttention2):
         # output projection
         torch.cuda.nvtx.range_push("qkvo")
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous()
-        A, SFA = agemm.reorder_quantize_x(attn_output, self.o_proj.reorder_index, self.o_proj.select_num)
-        attn_output = self.o_proj((A, SFA, bsz, q_len)).reshape(bsz, q_len, -1)
+        A, SFA, scale = reorder_quantize_x(attn_output, self.o_proj.reorder_index, self.o_proj.select_num)
+        attn_output = self.o_proj((A, SFA, scale, bsz, q_len)).reshape(bsz, q_len, -1)
         torch.cuda.nvtx.range_pop()
     
         if not output_attentions:
@@ -231,8 +233,9 @@ class LlamaRMSNorm(nn.Module):
     def forward(self, hidden_states):
         bsz, q_len, _ = hidden_states.shape
         hidden_states = hidden_states.reshape(bsz*q_len, -1).contiguous()
+        scale = 1.0
         A, SFA = agemm.rmsnorm_quantize_x(hidden_states, self.weight, self.variance_epsilon, self.reorder_index, self.select_num)
-        return (A, SFA, bsz, q_len)
+        return (A, SFA, scale, bsz, q_len)
     
 class FP16LlamaRMSNorm(nn.Module):
 
@@ -363,7 +366,7 @@ class LlamaModel(LlamaPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size,
                                          self.padding_idx)
         
-        select_num_filename = f'./saved/{name}_select_num_wikitext2_frobenius.pt'
+        select_num_filename = f'./saved/{name}_select_num_wikitext2_max.pt'
         select_nums = torch.load(select_num_filename, weights_only=False)
         if layer_idx is not None:
             self.layers = nn.ModuleList(
