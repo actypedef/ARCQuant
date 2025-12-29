@@ -21,7 +21,7 @@ def find_qlinear_layers(module, name=''):
         ))
     return res
 
-def reorder_quantize_w(w, reorder_index, select_num):
+def NVFP4_reorder_quantize_w(w, reorder_index, select_num):
     scale = torch.max(w).float() / (448.0*6.0)
     qw, scale_w = agemm.reorder_quantize_w(w/scale, reorder_index, select_num)
     return qw, scale_w, scale
@@ -33,6 +33,7 @@ class QLinearLayer(nn.Module):
         select_num, 
         reorder_index,
         out_reorder_index=None,
+        quant_type='NVFP4',
     ):
         super().__init__()
       
@@ -46,27 +47,31 @@ class QLinearLayer(nn.Module):
             self.bias = None
         
         self.select_num = select_num
+        self.quant_type = quant_type
 
-        # self.W, self.scale_w, self.scale = reorder_quantize_w(originalLayer.weight.data, reorder_index, select_num)
-        self.W, self.scale_w, self.scale = reorder_quantize_w(originalLayer.weight.data, reorder_index.to(torch.int16).cuda(), select_num)
-        reorder_index.cpu()
+        if self.quant_type == 'NVFP4':
+            self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w(originalLayer.weight.data, reorder_index.to(torch.int16).cuda(), select_num)
+        else:
+            self.W, self.scale_w, self.scale = fake_reorder_quantize_w(torch.index_select(originalLayer.weight.data, 1, reorder_index.to(torch.int32).cuda()), torch.arange(self.in_features), select_num, dtype=quant_type)
         
+        reorder_index.cpu()
         del reorder_index
         torch.cuda.empty_cache()
 
     @torch.no_grad()
     def forward(self, x):
         qx, scale_x, scale, bsz, q_len = x
+
+        if self.quant_type == 'NVFP4':
+            y = agemm.matmul(qx, self.W, scale_x, self.scale_w, scale * self.scale)
+        else:
+            y = F.linear(qx, self.W) * scale * self.scale
         
-        # qy = F.linear(qx, self.W)
-        # final_scale = scale * self.scale
-        # y = qy * final_scale
-        
-        y = agemm.matmul(qx, self.W, scale_x, self.scale_w, scale * self.scale)
         torch.cuda.synchronize()
         if self.bias is not None:
             y = y + self.bias
 
         y = y.reshape(bsz, q_len, -1)
         return y
+
     

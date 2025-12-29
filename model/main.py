@@ -1,11 +1,10 @@
 import torch
 from collections import defaultdict
 
-from model_utils import reorder_model_llama, reorder_model_qwen, reorder_model_mixtral
+from model_utils import reorder_model_llama, reorder_model_qwen
 from parallel_utils import map_layers_to_multi_gpus
 from datautils import get_loaders
 from eval import *
-from smooth import *
 
 from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
@@ -84,6 +83,10 @@ if __name__ == '__main__':
         "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
         help="The calibration dataset to use."
     )
+    parser.add_argument(
+        "--quant_type", type=str, default="NVFP4", choices=["NVFP4", "MXFP4", "INT4"], 
+        help="data type for W and A quantization."
+    )
   
     
     args = parser.parse_args()
@@ -98,10 +101,6 @@ if __name__ == '__main__':
     elif "qwen" in args.model.lower():
         model = get_qwen(args.model)
         reorder_model_func = reorder_model_qwen
-        
-    elif "mixtral" in args.model.lower():
-        model = get_mixtral(args.model)
-        reorder_model_func = reorder_model_mixtral
        
     model.eval()
 
@@ -122,7 +121,7 @@ if __name__ == '__main__':
     print("Reordering model...")
     start_time=time.time()
     model = reorder_model_func(
-        model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums
+        model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums, quant_type=args.quant_type
     )
     end_time=time.time()
     peak_memory = torch.cuda.max_memory_allocated()
@@ -130,6 +129,7 @@ if __name__ == '__main__':
 
     print(model)
     print(f"Quantized Model Size: {peak_memory/(1024*1024*1024):.2f} GB")
+    print(f"Quantized Type is: {args.quant_type} ")
     print(f"Total time taken: {end_time - start_time:.2f} seconds")
     bsz = "auto"
     if args.tasks is not None:

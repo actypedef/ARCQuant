@@ -149,47 +149,33 @@ def quantize_int4_tensor(tensor, group_size=128):
 
 def get_e3m2_values(device, dtype):
     
-    # 构建所有可能的正数
     vals = [0.0]
     
-    # Subnormals (E=0): 0.M * 2^-2 -> M * 0.25 * 0.25 -> M * 0.0625
-    # M values: 1, 2, 3 (0已包含)
     vals.extend([0.0625, 0.125, 0.1875])
     
-    # Normals (E=1 to 7): 1.M * 2^(E-3)
-    # Mantissa steps: 0.00, 0.25, 0.50, 0.75 -> Val: 1.0, 1.25, 1.5, 1.75
     mantissas = [1.0, 1.25, 1.5, 1.75]
     for E in range(1, 8): # E from 1 to 7
         exponent_val = 2 ** (E - 3)
         for m in mantissas:
             vals.append(m * exponent_val)
             
-    # 转为 tensor
     pos_vals = torch.tensor(vals, device=device, dtype=dtype)
-    # 添加负数部分并去重排序
     all_vals = torch.cat([-pos_vals, pos_vals]).unique()
     return torch.sort(all_vals)[0]
 
 def quantize_e3m2(tensor):
-    # 获取 E3M2 的量化码本
     representable_vals = get_e3m2_values(tensor.device, tensor.dtype)
     
-    # 寻找最近邻
-    # diff shape: (tensor_flat, num_representable)
     diff = torch.abs(tensor.unsqueeze(-1) - representable_vals)
     indices = torch.argmin(diff, dim=-1)
     
     return representable_vals[indices]
 
 def dequantize_e3m2(tensor):
-    # 伪量化函数直接返回的是浮点值，不需要额外反量化操作
     return tensor
 
 def quantize_mxfp6_tensor(tensor, group_size=32):
-    """
-    MXFP6 伪量化主函数
-    Block-wise scaling + FP6 (E3M2) quantization
-    """
+
     original_shape = tensor.shape
     
     # 1. Padding to align with group_size
@@ -200,12 +186,8 @@ def quantize_mxfp6_tensor(tensor, group_size=32):
     reshaped_tensor = tensor.view(-1, group_size)
     
     # 2. Calculate Scale
-    # 找到 block 内最大绝对值
     max_abs_val = torch.max(torch.abs(reshaped_tensor), dim=1, keepdim=True)[0]
     
-    # [关键修改] E3M2 的最大可表示值为 28.0 (E=7, M=3 => 1.75 * 2^4 = 28)
-    # 将最大值归一化到 range [-1, 1] 之外的 [-28, 28] 空间，或者理解为
-    # 我们希望 x / scale 能够落在 E3M2 的覆盖范围内。
     scale = max_abs_val / 28.0 
     scale[scale == 0] = 1e-9 
     
@@ -217,8 +199,6 @@ def quantize_mxfp6_tensor(tensor, group_size=32):
     normalized_tensor = reshaped_tensor / dequantized_scale
     
     # 5. Quantize Mantissa/Element (E3M2)
-    # 这里 normalized_tensor 的值域应该在 [-28, 28] 之间 (理想情况下)，
-    # 但由于 scale 量化的精度损失，可能会轻微溢出，quantize_e3m2 会自动 clamp 到最近值(即最大值)。
     quantized_e3m2_tensor = quantize_e3m2(normalized_tensor)
     
     # 6. Dequantize (Restore Scale)
@@ -233,57 +213,54 @@ def quantize_mxfp6_tensor(tensor, group_size=32):
     return dequantized_tensor.view(original_shape)
 
 
-# def reorder_quantize_w(w, reorder_index, select_num):
-#     scale = torch.max(w) / (448.0*6.0)
-#     # scale = 1.0
-#     w = w / scale
-#     scale_w = w.abs().max(dim=1, keepdim=True)[0] / 63.0
-#     scale_w[scale_w == 0] = 1e-9
-#     scale_w[scale_w != 0] = 1.0
-#     scaled_w = w / scale_w
-#     if select_num == 0:
-#         return quantize_nvfp4_tensor(scaled_w), scale_w, scale
-#         # return quantize_mxfp4_tensor(scaled_w), scale_w, scale
-#         # return quantize_int4_tensor(scaled_w), scale_w, scale
-#     else:
-#         topk_index = reorder_index[:select_num]
-#         return torch.cat([quantize_nvfp4_tensor(scaled_w), quantize_nvfp4_tensor(scaled_w[:, topk_index])], dim=1), scale_w, scale
-#         # return torch.cat([quantize_mxfp4_tensor(scaled_w), quantize_mxfp4_tensor(scaled_w[:, topk_index])], dim=1), scale_w, scale
-#         # return torch.cat([quantize_int4_tensor(scaled_w), quantize_int4_tensor(scaled_w[:, topk_index])], dim=1), scale_w, scale
+def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
+    
+    scale = torch.max(w).float() / (448.0*6.0)
+    quantize_func = quantize_nvfp4_tensor
+    
+    if dtype == "NVFP4":
+        scale = torch.max(w).float() / (448.0*6.0)
+        quantize_func = quantize_nvfp4_tensor
+    elif dtype == "MXFP4":
+        scale = 1.0
+        quantize_func = quantize_mxfp4_tensor
+    else:
+        scale = 1.0
+        quantize_func = quantize_int4_tensor
+    
+    w = w / scale
 
-# def reorder_quantize_x(x, reorder_index, select_num):
-#     scale = torch.max(x) / (448.0*6.0)
-#     # scale = 1.0
-#     x = x / scale
-#     scale_x = x.abs().max(dim=1, keepdim=True)[0] / 63.0
-#     scale_x[scale_x == 0] = 1e-9
-#     scale_x[scale_x != 0] = 1.0
-#     scaled_x = x / scale_x
-#     if select_num == 0:
-#         return quantize_nvfp4_tensor(scaled_x), scale_x, scale
-#         # return quantize_mxfp4_tensor(scaled_x), scale_x, scale
-#         # return quantize_int4_tensor(scaled_x), scale_x, scale
-#     else:
-#         topk_index = reorder_index[:select_num]
-#         q_x = quantize_nvfp4_tensor(scaled_x)
-#         # q_x = quantize_mxfp4_tensor(scaled_x)
-#         # q_x = quantize_int4_tensor(scaled_x)
-#         error_e = scaled_x - q_x
-#         q_error_k = quantize_nvfp4_tensor(error_e[:, topk_index])
-#         # q_error_k = quantize_mxfp4_tensor(error_e[:, topk_index])
-#         # q_error_k = quantize_int4_tensor(error_e[:, topk_index])
-#         return torch.cat([q_x, q_error_k], dim=1), scale_x, scale
+    scale_w = w.abs().max(dim=1, keepdim=True)[0]
+    if select_num == 0:
+        return quantize_func(w), scale_w, scale
+    else:
+        topk_index = reorder_index[-select_num:]
+        return torch.cat([quantize_func(w), quantize_func(w[:, topk_index])], dim=1), scale_w, scale
 
-# def reorder_quantize_w(w, reorder_index, select_num):
-#     scale = torch.max(w.abs()).float() / (448.0*6.0)
-#     # scale = 1.0
-#     w = w / scale
-#     qw, scale_w = agemm.reorder_quantize_w(w, reorder_index, select_num)
-#     return qw, scale_w, scale
+def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
+    
+    scale = torch.max(x).float() / (448.0*6.0)
+    quantize_func = quantize_nvfp4_tensor
+    
+    if dtype == "NVFP4":
+        scale = torch.max(x).float() / (448.0*6.0)
+        quantize_func = quantize_nvfp4_tensor
+    elif dtype == "MXFP4":
+        scale = 1.0
+        quantize_func = quantize_mxfp4_tensor
+    else:
+        scale = 1.0
+        quantize_func = quantize_int4_tensor
+    
+    x = x / scale
+    
+    scale_x = x.abs().max(dim=1, keepdim=True)[0]
+    if select_num == 0:
+        return quantize_func(x), scale_x, scale
+    else:
+        topk_index = reorder_index[-select_num:]
+        q_x = quantize_func(x)
+        error_e = x - q_x
+        q_error_k = quantize_func(error_e[:, topk_index])
+        return torch.cat([q_x, q_error_k], dim=1) * scale, scale_x, scale
 
-# def reorder_quantize_x(x, reorder_index, select_num):
-#     scale = torch.max(x.abs()).float() / (448.0*6.0)
-#     # scale = 1.0
-#     x = x / scale
-#     qx, scale_x = agemm.reorder_quantize_x(x, reorder_index, select_num)
-#     return qx, scale_x, scale

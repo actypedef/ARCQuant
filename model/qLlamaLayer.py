@@ -5,10 +5,82 @@ import math
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaAttention, LlamaMLP
 from qLinearLayer import QLinearLayer
 from quantize import *
+import os
 import sys
 sys.path.append('kernels/build/')
 import agemm 
 
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+def plot_tensor_distribution(tensor, save_path, threshold1=0, threshold2=0, lim=10):
+
+    if tensor.dim() != 1:
+        raise ValueError("dim != 1")
+
+    tensor_values = tensor.cpu().numpy()
+    
+    channels = range(tensor.size(0))
+
+    plt.figure(figsize=(6, 6))
+
+    if threshold1 == 0:
+        threshold1 = np.percentile(tensor_values, 90)
+        threshold2 = np.percentile(tensor_values, 99)
+
+    color_low, color_mid, color_high = '#82B366', '#D79B00', '#B85450'
+    colors = [
+        color_high if v >= threshold2 else (color_mid if v >= threshold1 else color_low)
+        for v in tensor_values
+    ]
+    plt.bar(channels, tensor_values, color=colors, width=1.0)
+
+    plt.title("Activation Quantization Error", fontsize=18)
+    plt.xlabel("Channel", fontsize=14)
+    plt.ylabel("Error", fontsize=14)
+    plt.ylim((0, lim))
+    plt.tick_params(axis='both', which='major', labelsize=12)
+    patch_high = mpatches.Patch(color=color_high, label=f'99%~100%')
+    patch_mid = mpatches.Patch(color=color_mid, label=f'90%~99%')
+    patch_low = mpatches.Patch(color=color_low, label=f'0%~90%')
+    
+    plt.legend(handles=[patch_high, patch_mid, patch_low], fontsize=12)
+
+    plt.savefig(save_path)
+
+    print(f"saved: {save_path}")
+    return threshold1, threshold2
+
+def display(X, reorder_index, select_num, file_path):
+    if os.path.exists(file_path + "_raw.png"):
+        return
+    # index = torch.flip(reorder_index.to(torch.int32), dims=[0])
+    index = reorder_index.to(torch.int32)
+    # x = X[-1,:].unsqueeze(0) # first token
+    # x.contiguous()
+    x = X
+    qX = quantize_nvfp4_tensor(x, group_size=16)
+    tensorE = x - qX
+    comming_scales1 = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
+    lim1, _ = comming_scales1.max(dim=0)
+    
+    qX = quantize_nvfp4_tensor(torch.index_select(x, 1, index), group_size=16)
+    tensorE = torch.index_select(x, 1, index) - qX
+    comming_scales2 = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
+    lim2, _ = comming_scales2.max(dim=0)
+
+    lim = lim1 if lim1 > lim2 else lim2
+    lim = lim1
+    threshold1, threshold2 = plot_tensor_distribution(comming_scales1, file_path+"_raw.png", lim=lim)
+    _1, _2 = plot_tensor_distribution(comming_scales2, file_path+"_reordered.png", lim=lim)
+    qx, scale_x, scale = fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[1]), select_num)
+
+    # topk_index = index[:self.o_proj.select_num]
+    qx[:, -2*select_num:-select_num] += qx[:, -select_num:]
+    tensorE = torch.index_select(x, 1, index) - qx[:, :-select_num]
+    # tensorE[:, topk_index] -= qx[:, -self.o_proj.select_num:]
+    comming_scales = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
+    _1, _2 = plot_tensor_distribution(comming_scales, file_path+"_aug.png", threshold1=threshold1, threshold2=threshold2, lim=lim)
 
 @torch.no_grad()
 def quantize_int_group(w, nbits, group_size):
@@ -66,10 +138,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-def reorder_quantize_x(x, reorder_index, select_num):
+def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     scale = torch.max(x.abs()).float() / (448.0*6.0)
     qx, scale_x = agemm.reorder_quantize_x(x/scale, reorder_index, select_num)
     return qx, scale_x, scale
+
+def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
+    if quant_type == 'NVFP4':
+        return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+    else:
+        index = reorder_index.to(torch.int32)
+        return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
 
 class QLlamaDecoderLayer(nn.Module):
     def __init__(
@@ -78,7 +157,8 @@ class QLlamaDecoderLayer(nn.Module):
         kv_cache,
         select_nums,
         reorder_index,
-        layer_idx
+        layer_idx,
+        quant_type,
     ):
         super().__init__()
        
@@ -88,14 +168,16 @@ class QLlamaDecoderLayer(nn.Module):
             kv_cache,
             select_nums=select_nums,
             reorder_index=reorder_index,
-            i=layer_idx
+            i=layer_idx,
+            quant_type=quant_type
         )
         # self.self_attn = originalLayer.self_attn
         self.mlp = QLlamaMLP(
             originalLayer.mlp,
             select_nums=select_nums,
             reorder_index=reorder_index,
-            i=layer_idx
+            i=layer_idx,
+            quant_type=quant_type
         )
         # self.mlp = originalLayer.mlp
         self.input_layernorm = QLlamaRMSNorm(
@@ -196,7 +278,8 @@ class QLlamaAttention(nn.Module):
         kv_cache,
         select_nums,
         reorder_index,
-        i
+        i,
+        quant_type
     ):
         super().__init__()
         self.q_kv_cache = kv_cache
@@ -209,6 +292,7 @@ class QLlamaAttention(nn.Module):
         self.max_position_embeddings = originalAttn.max_position_embeddings
         self.rope_theta = originalAttn.rope_theta
         self.layer_idx = i
+        self.quant_type = quant_type
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -219,22 +303,26 @@ class QLlamaAttention(nn.Module):
         self.q_proj = QLinearLayer(
             originalAttn.q_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')]
+            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
+            quant_type=quant_type
         )
         self.k_proj = QLinearLayer(
             originalAttn.k_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')]
+            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
+            quant_type=quant_type
         )
         self.v_proj = QLinearLayer(
             originalAttn.v_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')]
+            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
+            quant_type=quant_type
         )
         self.o_proj = QLinearLayer(
             originalAttn.o_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')]
+            reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
+            quant_type=quant_type
         )
         self.rotary_emb = originalAttn.rotary_emb
 
@@ -271,7 +359,7 @@ class QLlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         
         hidden_states = hidden_states.reshape(bsz*q_len, -1).contiguous().detach()
-        qx, scale_x, scale = reorder_quantize_x(hidden_states, self.q_reorder_index, self.q_proj.select_num)
+        qx, scale_x, scale = reorder_quantize_x(hidden_states, self.q_reorder_index, self.q_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         
         hidden_states = (qx, scale_x, scale, bsz, q_len)
@@ -337,7 +425,10 @@ class QLlamaAttention(nn.Module):
       
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
 
-        qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num)
+        # file_path = f"./results/llama_layer{self.layer_idx}_o"
+        # display(attn_output, self.o_reorder_index, self.o_proj.select_num, file_path)
+
+        qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
@@ -354,29 +445,37 @@ class QLlamaMLP(nn.Module):
         originalMLP: LlamaMLP,
         select_nums,
         reorder_index,
-        i
+        i,
+        quant_type
     ):
         super().__init__()
         nameTemplate = 'layers.{}.{}.{}.{}'
+
+        self.quant_type = quant_type
         
         self.gate_proj = QLinearLayer(
             originalMLP.gate_proj,
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
-            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')]
+            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
+            quant_type=self.quant_type
         )
         self.down_proj = QLinearLayer(
             originalMLP.down_proj,
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')]
+            reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
+            quant_type=self.quant_type
         )
         self.up_proj = QLinearLayer(
             originalMLP.up_proj,
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
-            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')]
+            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
+            quant_type=self.quant_type
         )
         self.act_fn = originalMLP.act_fn
+        self.layer_idx = i
+        
         
     def to(self, *args, **kwargs):
         super(QLlamaMLP, self).to(*args, **kwargs)
@@ -394,7 +493,7 @@ class QLlamaMLP(nn.Module):
         bsz, q_len, _ = x.shape
         x = x.reshape(bsz*q_len, -1).contiguous().detach()
 
-        qx, scale_x, scale = reorder_quantize_x(x, self.up_reorder_index, self.up_proj.select_num)
+        qx, scale_x, scale = reorder_quantize_x(x, self.up_reorder_index, self.up_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
         tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
@@ -403,7 +502,10 @@ class QLlamaMLP(nn.Module):
         bsz, q_len, _ = tmpResult.shape
         tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
 
-        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.down_reorder_index, self.down_proj.select_num)
+        # file_path = f"./results/llama_layer{self.layer_idx}_down"
+        # display(tmpResult, self.down_reorder_index, self.down_proj.select_num, file_path)
+
+        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.down_reorder_index, self.down_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, bsz, q_len)
        
