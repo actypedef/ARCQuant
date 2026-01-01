@@ -512,8 +512,8 @@ class QLlamaAttention(nn.Module):
       
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
 
-        file_path = f"./results/llama_layer{self.layer_idx}_o"
-        display(attn_output, self.o_reorder_index, self.o_proj.select_num, file_path)
+        # file_path = f"./results/llama_layer{self.layer_idx}_o"
+        # display(attn_output, self.o_reorder_index, self.o_proj.select_num, file_path)
 
         qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
