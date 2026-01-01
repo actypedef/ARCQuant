@@ -10,6 +10,7 @@ import agemm
 import math
 import random
 
+
 def find_qlinear_layers(module, name=''):
     if type(module) == QLinearLayer:
         if module.enable_quant:
@@ -23,6 +24,7 @@ def find_qlinear_layers(module, name=''):
 
 def NVFP4_reorder_quantize_w(w, reorder_index, select_num):
     scale = torch.max(w).float() / (448.0*6.0)
+    # scale = 1.0
     qw, scale_w = agemm.reorder_quantize_w(w/scale, reorder_index, select_num)
     return qw, scale_w, scale
     
@@ -50,9 +52,11 @@ class QLinearLayer(nn.Module):
         self.quant_type = quant_type
 
         if self.quant_type == 'NVFP4':
-            self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w(originalLayer.weight.data, reorder_index.to(torch.int16).cuda(), select_num)
+            # self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), torch.arange(self.in_features).to(torch.int16).cuda(), 0)
+            self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), reorder_index.to(torch.int16).cuda(), select_num)
         else:
-            self.W, self.scale_w, self.scale = fake_reorder_quantize_w(torch.index_select(originalLayer.weight.data, 1, reorder_index.to(torch.int32).cuda()), torch.arange(self.in_features), select_num, dtype=quant_type)
+            self.W, self.scale_w, self.scale = fake_reorder_quantize_w(originalLayer.weight.data, torch.arange(self.in_features), 0, dtype=quant_type)
+            # self.W, self.scale_w, self.scale = fake_reorder_quantize_w(torch.index_select(originalLayer.weight.data, 1, reorder_index.to(torch.int32).cuda()), torch.arange(self.in_features), select_num, dtype=quant_type)
         
         reorder_index.cpu()
         del reorder_index

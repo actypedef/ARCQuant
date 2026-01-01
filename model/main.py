@@ -5,6 +5,7 @@ from model_utils import reorder_model_llama, reorder_model_qwen
 from parallel_utils import map_layers_to_multi_gpus
 from datautils import get_loaders
 from eval import *
+from smooth import *
 
 from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
@@ -109,6 +110,7 @@ if __name__ == '__main__':
     dataset_name = args.dataset.lower()
     index_filename = f'./saved/{model_name.lower()}_reorder_index_{dataset_name}_{args.act_sort_metric}.pt'
     select_num_filename = f'./saved/{model_name.lower()}_select_num_{dataset_name}_{args.act_sort_metric}.pt'
+    act_scales_filename = f'./saved/{model_name.lower()}_act_scales_{dataset_name}_{args.act_sort_metric}.pt'
  
     
     assert os.path.isfile(index_filename), "reorder index file not found."
@@ -116,6 +118,9 @@ if __name__ == '__main__':
     print("Loading cached reording index from disk...")
     reorder_index = torch.load(index_filename, weights_only=False)
     select_nums = torch.load(select_num_filename, weights_only=False)
+    act_scales = torch.load(act_scales_filename, weights_only=False)
+    # smooth_lm(model, act_scales, alpha=0.5)
+
     
     torch.cuda.reset_max_memory_allocated()
     print("Reordering model...")
@@ -134,7 +139,7 @@ if __name__ == '__main__':
     bsz = "auto"
     if args.tasks is not None:
         if 'mmlu' in args.tasks :
-            bsz = 1
+            bsz = 4
  
     from transformers import AutoTokenizer
     lm = HFLM(model, batch_size=bsz)

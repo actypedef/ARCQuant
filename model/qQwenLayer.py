@@ -139,12 +139,14 @@ def get_hadamard(n):
 
 def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     scale = torch.max(x.abs()).float() / (448.0*6.0)
+    # scale = 1.0
     qx, scale_x = agemm.reorder_quantize_x(x/scale, reorder_index, select_num)
     return qx, scale_x, scale
 
 def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
     if quant_type == 'NVFP4':
-        return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+        return NVFP4_reorder_quantize_x(hadamard_transform(x), torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
+        # NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     else:
         index = reorder_index.to(torch.int32)
         return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)

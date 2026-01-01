@@ -1,7 +1,7 @@
 # ARCQuant: Boosting NVFP4 Quantization with Augmented Residual Channels for LLMs
 
 
-![arcquant](kernels/ARCQuant.png)
+![arcquant](kernels/ARCQuant_Visualize.png)
 
 **ARCQuant** is a high-performance quantization framework designed to resolve the conflict between **accuracy** and **inference efficiency** in low-bit LLMs.
 

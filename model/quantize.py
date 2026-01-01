@@ -7,6 +7,59 @@ import sys
 sys.path.append('kernels/build/')
 import agemm 
 
+import math
+import random
+
+def hadamard_transform(x, normalize=True, block_size=-1):
+    n = x.shape[-1]
+    if block_size == -1:
+        if n <= 0 or (n & (n - 1)) != 0:
+            return x
+    else:
+        if block_size <= 0 or (block_size & (block_size - 1)) != 0:
+            raise ValueError(f"block_size {block_size} 必须是2的幂次")
+        if n % block_size != 0:
+            raise ValueError(f"最后一维长度 {n} 必须能被block_size {block_size} 整除")
+    
+    original_shape = x.shape
+    
+    if block_size != -1:
+        num_blocks = n // block_size
+        x = x.view(-1, num_blocks, block_size)
+        batch_dim = x.shape[0]
+        current_n = block_size
+    else:
+        x = x.view(-1, n)
+        batch_dim = x.shape[0]
+        current_n = n
+    
+    h = x.clone()
+    num_stages = int(torch.log2(torch.tensor(current_n, dtype=torch.float32)).item())
+    
+    for stage in range(num_stages):
+        stage_block_size = 2 ** (stage + 1)
+        half_block_size = stage_block_size // 2
+        if block_size != -1:
+            temp = h.view(batch_dim, -1, stage_block_size)
+        else:
+            temp = h.view(batch_dim, -1, stage_block_size)
+        front_half = temp[:, :, :half_block_size]
+        back_half = temp[:, :, half_block_size:]
+        new_front = front_half + back_half
+        new_back = front_half - back_half
+        h = torch.cat([new_front, new_back], dim=2)
+        if block_size != -1:
+            h = h.view(batch_dim, -1, current_n)
+        else:
+            h = h.view(batch_dim, current_n)
+    
+    if normalize:
+        h = h / torch.sqrt(torch.tensor(current_n, dtype=torch.float32))
+    if block_size != -1:
+        h = h.view(-1, num_blocks * block_size)
+    h = h.view(original_shape)
+    return h
+
 
 def quantize_e2m1(tensor):
     representable_vals = torch.tensor([
