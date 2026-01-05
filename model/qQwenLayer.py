@@ -5,6 +5,7 @@ import math
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm, Qwen2Attention, Qwen2MLP
 from qLinearLayer import QLinearLayer
 from quantize import *
+from visualize import *
 import os
 import sys
 sys.path.append('kernels/build/')
@@ -12,75 +13,6 @@ import agemm
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-
-def plot_tensor_distribution(tensor, save_path, threshold1=0, threshold2=0, lim=10):
-
-    if tensor.dim() != 1:
-        raise ValueError("dim != 1")
-
-    tensor_values = tensor.cpu().numpy()
-    
-    channels = range(tensor.size(0))
-
-    plt.figure(figsize=(6, 6))
-
-    if threshold1 == 0:
-        threshold1 = np.percentile(tensor_values, 90)
-        threshold2 = np.percentile(tensor_values, 99)
-
-    color_low, color_mid, color_high = '#82B366', '#D79B00', '#B85450'
-    colors = [
-        color_high if v >= threshold2 else (color_mid if v >= threshold1 else color_low)
-        for v in tensor_values
-    ]
-    plt.bar(channels, tensor_values, color=colors, width=1.0)
-
-    plt.title("Activation Quantization Error", fontsize=18)
-    plt.xlabel("Channel", fontsize=14)
-    plt.ylabel("Error", fontsize=14)
-    plt.ylim((0, lim))
-    plt.tick_params(axis='both', which='major', labelsize=12)
-    patch_high = mpatches.Patch(color=color_high, label=f'99%~100%')
-    patch_mid = mpatches.Patch(color=color_mid, label=f'90%~99%')
-    patch_low = mpatches.Patch(color=color_low, label=f'0%~90%')
-    
-    plt.legend(handles=[patch_high, patch_mid, patch_low], fontsize=12)
-
-    plt.savefig(save_path)
-
-    print(f"saved: {save_path}")
-    return threshold1, threshold2
-
-def display(X, reorder_index, select_num, file_path):
-    if os.path.exists(file_path + "_raw.png"):
-        return
-    # index = torch.flip(reorder_index.to(torch.int32), dims=[0])
-    index = reorder_index.to(torch.int32)
-    # x = X[-1,:].unsqueeze(0) # first token
-    # x.contiguous()
-    x = X
-    qX = quantize_nvfp4_tensor(x, group_size=16)
-    tensorE = x - qX
-    comming_scales1 = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
-    lim1, _ = comming_scales1.max(dim=0)
-    
-    qX = quantize_nvfp4_tensor(torch.index_select(x, 1, index), group_size=16)
-    tensorE = torch.index_select(x, 1, index) - qX
-    comming_scales2 = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
-    lim2, _ = comming_scales2.max(dim=0)
-
-    lim = lim1 if lim1 > lim2 else lim2
-    lim = lim1
-    threshold1, threshold2 = plot_tensor_distribution(comming_scales1, file_path+"_raw.png", lim=lim)
-    _1, _2 = plot_tensor_distribution(comming_scales2, file_path+"_reordered.png", lim=lim)
-    qx, scale_x, scale = fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[1]), select_num)
-
-    # topk_index = index[:self.o_proj.select_num]
-    qx[:, -2*select_num:-select_num] += qx[:, -select_num:]
-    tensorE = torch.index_select(x, 1, index) - qx[:, :-select_num]
-    # tensorE[:, topk_index] -= qx[:, -self.o_proj.select_num:]
-    comming_scales = torch.linalg.norm(tensorE, ord=2, dim=0).float().cpu()
-    _1, _2 = plot_tensor_distribution(comming_scales, file_path+"_aug.png", threshold1=threshold1, threshold2=threshold2, lim=lim)
 
 
 def rotate_half(x):
@@ -139,14 +71,13 @@ def get_hadamard(n):
 
 def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     scale = torch.max(x.abs()).float() / (448.0*6.0)
-    # scale = 1.0
     qx, scale_x = agemm.reorder_quantize_x(x/scale, reorder_index, select_num)
     return qx, scale_x, scale
 
 def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
     if quant_type == 'NVFP4':
-        return NVFP4_reorder_quantize_x(hadamard_transform(x), torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
-        # NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+        # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
+        return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     else:
         index = reorder_index.to(torch.int32)
         return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
@@ -354,8 +285,6 @@ class QQwen2Attention(nn.Module):
         hidden_states = (qx, scale_x, scale, bsz, q_len)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # file_path = f"./results/qwen_layer{self.layer_idx}_q"
-        # display(query_states, self.q_reorder_index, self.q_proj.select_num, file_path)
         
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -418,9 +347,6 @@ class QQwen2Attention(nn.Module):
           
        
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
-
-        # file_path = f"./results/qwen_layer{self.layer_idx}_o"
-        # display(attn_output, self.o_reorder_index, self.o_proj.select_num, file_path)
 
         qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
         torch.cuda.synchronize()

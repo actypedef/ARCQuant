@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import time
 
-# import flashinfer
+import flashinfer
 import torch
 import transformers
 import dataclasses
@@ -16,7 +16,6 @@ class ModelConfig:
     name: str
     num_layers: int
     num_heads: int
-    num_key_value_heads: int
     hidden_size: int
     intermediate_size: int
     attention_bias: False
@@ -30,7 +29,6 @@ MODEL_CFGS = {
             name='qwen2.5-7b',
             num_layers=28,
             num_heads=28,
-            num_key_value_heads=4,
             hidden_size=3584,
             intermediate_size=18944,
             attention_bias=True,
@@ -41,20 +39,8 @@ MODEL_CFGS = {
             name='llama-2-7b',
             num_layers=32,
             num_heads=32,
-            num_key_value_heads=32,
             hidden_size=4096,
             intermediate_size=11008,
-            attention_bias=False,
-            mlp_bias=False
-        ),
-    "llama-2-13b":
-        ModelConfig(
-            name='llama-2-13b',
-            num_layers=40,
-            num_heads=40,
-            num_key_value_heads=40,
-            hidden_size=5120,
-            intermediate_size=13824,
             attention_bias=False,
             mlp_bias=False
         ),
@@ -63,7 +49,6 @@ MODEL_CFGS = {
             name='llama-3.1-8b',
             num_layers=32,
             num_heads=32,
-            num_key_value_heads=8,
             hidden_size=4096,
             intermediate_size=14336,
             attention_bias=False,
@@ -74,7 +59,6 @@ MODEL_CFGS = {
             name='qwen2.5-14b',
             num_layers=48,
             num_heads=40,
-            num_key_value_heads=8,
             hidden_size=5120,
             intermediate_size=13824,
             attention_bias=True,
@@ -85,7 +69,6 @@ MODEL_CFGS = {
             name='qwen2.5-32b',
             num_layers=64,
             num_heads=40,
-            num_key_value_heads=8,
             hidden_size=5120,
             intermediate_size=27648,
             attention_bias=True,
@@ -95,8 +78,8 @@ MODEL_CFGS = {
 
 
 benchmark_dtypes = ["int4", torch.float16]
-num_warmup_steps = 1
-num_bench_steps = 1
+num_warmup_steps = 2
+num_bench_steps = 4
 
 def repeated_run(num_repeats=10):
     def func(module):
@@ -140,8 +123,6 @@ def get_model_quantized(name, model_cfg):
         LlamaConfig(
             hidden_size=model_cfg.hidden_size,
             num_heads=model_cfg.num_heads,
-            num_attention_heads=model_cfg.num_heads,
-            num_key_value_heads=model_cfg.num_key_value_heads,
             intermediate_size=model_cfg.intermediate_size,
             num_hidden_layers=model_cfg.num_layers,
         )).to(model_cfg.device)
@@ -161,14 +142,14 @@ def run_prefill(model, bsz, prefill_length, config):
 def run_decode(model, bsz, prefill_length, decode_steps):
     device = 'cuda'
     test_input = torch.randint(100, 200, (bsz, prefill_length), dtype=torch.int32, device=device)
-    model.model._expected_max_length = prefill_length + decode_steps
+    model._expected_max_length = prefill_length + decode_steps
     out = model(test_input)
     past_key_value = out
     del out
     _cleanup()
     next_input = torch.tensor([[100] for _ in range (bsz)], dtype=torch.int32, device=device)
     def _decode_for_multiple_steps():
-        past_key_value.length = prefill_length
+        # past_key_value.length = prefill_length
         for _ in range(decode_steps):
             model(next_input, past_key_value=past_key_value)
     return module_benchmark(_decode_for_multiple_steps)
@@ -178,7 +159,7 @@ def run_e2e(model, bsz, prefill_length, decode_steps):
     test_input = torch.randint(100, 200, (bsz, prefill_length), dtype=torch.int32, device=device)
     next_input = torch.tensor([[100] for _ in range (bsz)], dtype=torch.int32, device=device)
     def _prefill_and_decode_for_multiple_steps():
-        model.model._expected_max_length = prefill_length + decode_steps
+        model._expected_max_length = prefill_length + decode_steps
         out = model(test_input)
         for _ in range(decode_steps):
             model(next_input, past_key_value=out)
@@ -218,14 +199,14 @@ def benchmark(args):
     del model
     _cleanup()
 
-    print(f"Prefill time: {np.mean(time_prefill_i4):.3f} +- {1.96 * np.std(time_prefill_i4):.3f}ms")
+    print(f"Prefill ARCQuant time: {np.mean(time_prefill_i4):.3f} +- {1.96 * np.std(time_prefill_i4):.3f}ms")
     print('--------------')
     if args.decode_steps is not None:
-        print(f"Decode time: {np.mean(time_decode_i4):.3f} +- {1.96 * np.std(time_decode_i4):.3f}ms")
-        print(f"E2E time: {np.mean(time_e2e_i4):.3f} +- {1.96 * np.std(time_e2e_i4):.3f}ms")
+        print(f"Decode ARCQuant time: {np.mean(time_decode_i4):.3f} +- {1.96 * np.std(time_decode_i4):.3f}ms")
+        print(f"E2E ARCQuant time: {np.mean(time_e2e_i4):.3f} +- {1.96 * np.std(time_e2e_i4):.3f}ms")
         print('--------------')
     
-    print(f"Memory: {np.mean(mem_i4) / (1024 * 1024 * 1024):.3f}GB +- {1.96 * np.std(mem_i4):.3f}")
+    print(f"ARCQuant memory: {np.mean(mem_i4) / (1024 * 1024 * 1024):.3f}GB +- {1.96 * np.std(mem_i4):.3f}")
 
 
 if __name__ == '__main__':

@@ -5,7 +5,6 @@ from model_utils import reorder_model_llama, reorder_model_qwen
 from parallel_utils import map_layers_to_multi_gpus
 from datautils import get_loaders
 from eval import *
-from smooth import *
 
 from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
@@ -14,6 +13,8 @@ from lm_eval.utils import make_table
 from lm_eval.models.huggingface import HFLM
 
 import time
+
+from visualize import *
 
 
 def get_llama(model):
@@ -119,7 +120,6 @@ if __name__ == '__main__':
     reorder_index = torch.load(index_filename, weights_only=False)
     select_nums = torch.load(select_num_filename, weights_only=False)
     act_scales = torch.load(act_scales_filename, weights_only=False)
-    # smooth_lm(model, act_scales, alpha=0.5)
 
     
     torch.cuda.reset_max_memory_allocated()
@@ -172,7 +172,6 @@ if __name__ == '__main__':
 
             print(f"Result,{dataset},{ppl:.3f}")
 
-    
     
             
     if args.tasks is not None:

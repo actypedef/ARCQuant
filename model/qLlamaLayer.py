@@ -5,6 +5,7 @@ import math
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaAttention, LlamaMLP
 from qLinearLayer import QLinearLayer
 from quantize import *
+from visualize import *
 import os
 import sys
 sys.path.append('kernels/build/')
@@ -12,159 +13,6 @@ import agemm
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-
-def plot_sub_bar(ax, tensor_data, color, title=None, mse=None, y_lim=None, background_data=None, bg_color=None):
-    # 辅助绘图函数
-    values = tensor_data.cpu().numpy()
-    channels = range(len(values))
-    
-    # 1. 绘制背景（ARCQuant补偿前的误差）
-    if background_data is not None and bg_color is not None:
-        bg_values = background_data.cpu().numpy()
-        ax.bar(channels, bg_values, color=bg_color, width=1.0, alpha=0.6, label='Pre-Compensation')
-        
-    # 2. 绘制前景（最终数据）
-    ax.bar(channels, values, color=color, width=1.0, label='Final')
-    
-    # 3. 设置标题
-    if title:
-        # 使用衬线字体让标题看起来更学术，或者保持默认sans-serif
-        ax.set_title(title, fontsize=13, fontweight='bold', pad=8)
-    
-    # 4. 标注 MSE
-    if mse is not None:
-        # 使用科学计数法，并放置在右上角
-        ax.text(0.95, 0.92, f"MSE: {mse:.2e}", transform=ax.transAxes, 
-                ha='right', va='top', fontsize=10, family='monospace', fontweight='bold',
-                bbox=dict(boxstyle="square,pad=0.3", fc="white", ec="black", alpha=0.8, lw=0.8))
-        
-    # 5. 设置量程
-    if y_lim:
-        ax.set_ylim(0, y_lim)
-        
-    # 6. 坐标轴样式
-    ax.tick_params(axis='both', which='major', labelsize=9)
-    ax.set_xticks([]) # 隐藏X轴刻度，因为通道数太多显示不全且不美观
-    ax.spines['top'].set_visible(False) # 去掉上边框
-    ax.spines['right'].set_visible(False) # 去掉右边框
-
-def display(X, reorder_index, select_num, file_path):
-    if os.path.exists(file_path + "_comparison.png"):
-        return
-
-    # 准备数据
-    x = X.float()
-    index = reorder_index.to(torch.int32)
-    
-    # --- 新的学术配色方案 ---
-    color_act = '#003366'       # Navy Blue (深海军蓝) - 用于激活值
-    color_err = '#800000'       # Burgundy (深酒红) - 用于误差
-    color_err_light = '#E6B0AA' # Pale Red (浅红/肉粉色) - 用于补偿前背景
-    
-    # 初始化画布 2行3列
-    fig, axes = plt.subplots(2, 3, figsize=(16, 8), dpi=150)
-    plt.subplots_adjust(wspace=0.15, hspace=0.25) # 调整间距
-    
-    cols = ["NVFP4", "Hadamard + NVFP4", "ARCQuant"]
-
-    # 设置列标题 (仅在第一行上方显示，或者每张图都显示)
-    # 这里我们在 plot_sub_bar 里分别传 title，这样更清晰
-
-    # =========================================================
-    # 1. NVFP4 (Standard)
-    # =========================================================
-    # Activation
-    act_1 = torch.max(torch.abs(x), dim=0)[0] 
-    
-    # Error
-    qX_nvfp4 = quantize_nvfp4_tensor(x, group_size=16)
-    err_tensor_1 = x - qX_nvfp4
-    err_1 = torch.linalg.norm(err_tensor_1, ord=2, dim=0)
-    mse_1 = torch.mean(err_tensor_1 ** 2).item()
-
-    # =========================================================
-    # 2. Hadamard + NVFP4
-    # =========================================================
-    # Activation (Transformed)
-    x_had = hadamard_transform(x)
-    act_2 = torch.max(torch.abs(x_had), dim=0)[0]
-    
-    # Error (Transformed Domain)
-    qX_had_nvfp4 = quantize_nvfp4_tensor(x_had, group_size=16)
-    err_tensor_2 = x_had - qX_had_nvfp4
-    err_2 = torch.linalg.norm(err_tensor_2, ord=2, dim=0)
-    mse_2 = torch.mean(err_tensor_2 ** 2).item()
-
-    # =========================================================
-    # 3. ARCQuant (With Compensation Visualization)
-    # =========================================================
-    # Activation (Reordered)
-    x_reordered = torch.index_select(x, 1, index)
-    act_3 = torch.max(torch.abs(x_reordered), dim=0)[0]
-    
-    # Error Calculation logic
-    # Step A: 模拟量化过程，获取补偿前的状态
-    qx, scale_x, scale = fake_reorder_quantize_x(x_reordered, torch.arange(x.shape[1]), select_num)
-    
-    # Step B: 计算补偿前的误差 (Pre-Compensation)
-    # 注意：qx[:, :-select_num] 此时是未叠加补偿值的
-    tensorE_pre = x_reordered - qx[:, :-select_num]
-    err_pre_comp = torch.linalg.norm(tensorE_pre, ord=2, dim=0).float().cpu()
-    
-    # Step C: 执行补偿
-    qx[:, -2*select_num:-select_num] += qx[:, -select_num:]
-    
-    # Step D: 计算最终误差 (Final)
-    tensorE_final = x_reordered - qx[:, :-select_num]
-    err_3 = torch.linalg.norm(tensorE_final, ord=2, dim=0).float().cpu()
-    mse_3 = torch.mean(tensorE_final ** 2).item()
-
-    # =========================================================
-    # 统一 Y 轴量程 (Global Scaling)
-    # =========================================================
-    # 激活值量程：取三者最大
-    ymax_act = max(act_1.max(), act_2.max(), act_3.max()).item() * 1.15
-    
-    # 误差量程：取三者最大 (必须包含 err_pre_comp 以展示削减效果)
-    ymax_err = max(err_1.max(), err_2.max(), err_pre_comp.max()).item() * 1.15
-
-    # =========================================================
-    # 绘图流程
-    # =========================================================
-
-    ymax_err, ymax_act = ymax_err * 0.75, ymax_act * 0.75
-    # --- Row 1: Activations ---
-    # Col 1: NVFP4
-    plot_sub_bar(axes[0, 0], act_1, color_act, title="NVFP4\nActivation Dist.", y_lim=ymax_act)
-    axes[0, 0].set_ylabel("Activation (Max)", fontsize=12, fontweight='bold')
-    
-    # Col 2: Hadamard
-    plot_sub_bar(axes[0, 1], act_2, color_act, title="Hadamard + NVFP4\nActivation Dist.", y_lim=ymax_act)
-    
-    # Col 3: ARCQuant
-    plot_sub_bar(axes[0, 2], act_3, color_act, title="ARCQuant\nActivation Dist.", y_lim=ymax_act)
-
-    # --- Row 2: Quantization Errors ---
-    # Col 1: NVFP4
-    plot_sub_bar(axes[1, 0], err_1, color_err, title=None, mse=mse_1, y_lim=ymax_err)
-    axes[1, 0].set_ylabel("Error (L2 Norm)", fontsize=12, fontweight='bold')
-    
-    # Col 2: Hadamard
-    plot_sub_bar(axes[1, 1], err_2, color_err, title=None, mse=mse_2, y_lim=ymax_err)
-    
-    # Col 3: ARCQuant (重点：传入背景数据)
-    plot_sub_bar(axes[1, 2], err_3, color_err, title=None, mse=mse_3, y_lim=ymax_err,
-                 background_data=err_pre_comp, bg_color=color_err_light)
-    
-    # 在 ARCQuant 误差图上加一个简单的图例或标注，解释浅色柱子
-    # 由于 legend 可能会遮挡，我们在图外或者角落简单标注
-    axes[1, 2].legend(fontsize=9, loc='upper left', frameon=False)
-
-    # 保存
-    save_name = file_path + "_comparison.png"
-    plt.savefig(save_name, bbox_inches='tight')
-    plt.close()
-    print(f"saved: {save_name}")
 
 @torch.no_grad()
 def quantize_int_group(w, nbits, group_size):
@@ -512,8 +360,6 @@ class QLlamaAttention(nn.Module):
       
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
 
-        # file_path = f"./results/llama_layer{self.layer_idx}_o"
-        # display(attn_output, self.o_reorder_index, self.o_proj.select_num, file_path)
 
         qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
@@ -588,9 +434,7 @@ class QLlamaMLP(nn.Module):
 
         bsz, q_len, _ = tmpResult.shape
         tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
-
-        # file_path = f"./results/llama_layer{self.layer_idx}_down"
-        # display(tmpResult, self.down_reorder_index, self.down_proj.select_num, file_path)
+        
 
         qx, scale_x, scale = reorder_quantize_x(tmpResult, self.down_reorder_index, self.down_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
