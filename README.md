@@ -50,7 +50,7 @@ Results are saved in ./saved/
 
 ### 2.3 Accuracy Evaluation
 ```bash
-bash run_arcquant.sh /PATH/TO/YOUR/MODEL/
+bash evaluate.sh /PATH/TO/YOUR/MODEL/
 ```
 
 ## 3. Efficiency Evaluation
