@@ -140,6 +140,8 @@ std::tuple<torch::Tensor, torch::Tensor> reorder_quantize_x(
 
     switch (KQ) {
         
+        CASE_REORDER_X_16(2048) // llama 3.2-1B
+        CASE_REORDER_X_16(3072) // llama 3.2-3B
         CASE_REORDER_X_16(4096)
         CASE_REORDER_X_16(5120)
         CASE_REORDER_X_16(8192)
@@ -185,7 +187,8 @@ std::tuple<torch::Tensor, torch::Tensor> reorder_quantize_w(
     auto ptr_SFW  = reinterpret_cast<cutlass::float_ue4m3_t *>(SFW.data_ptr<uint8_t>());
 
     switch (KQ) {
-        
+        CASE_REORDER_W_16(2048) // llama 3.2-1B
+        CASE_REORDER_W_16(3072) // llama 3.2-3B
         CASE_REORDER_W_16(4096)
         CASE_REORDER_W_16(5120)
         CASE_REORDER_W_16(8192)
@@ -234,7 +237,9 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_quantize_x(
     auto ptr_SFX  = reinterpret_cast<cutlass::float_ue4m3_t *>(SFX.data_ptr<uint8_t>());
 
     switch (KQ) {
-        
+
+        CASE_RUN_RMSNORM_X_KERNEL(2048)
+        CASE_RUN_RMSNORM_X_KERNEL(3072)
         CASE_RUN_RMSNORM_X_KERNEL(3584)
         CASE_RUN_RMSNORM_X_KERNEL(4096)
         CASE_RUN_RMSNORM_X_KERNEL(5120)

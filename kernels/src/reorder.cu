@@ -739,6 +739,27 @@ void run_reorder32_w_bf16_nvfp4(
 
 
 ///////////////////////////////// Llama /////////////////////////////////
+
+template void run_reorder_x_bf16_nvfp4<16, 2048>(
+  bf16_t*, int, int16_t*, uint8_t*,
+  sf_t*, int, int
+);
+
+template void run_reorder_w_bf16_nvfp4<16, 2048>(
+  bf16_t*, int, int16_t*, uint8_t*,
+  sf_t*, int, int
+);
+
+template void run_reorder_x_bf16_nvfp4<16, 3072>(
+  bf16_t*, int, int16_t*, uint8_t*,
+  sf_t*, int, int
+);
+
+template void run_reorder_w_bf16_nvfp4<16, 3072>(
+  bf16_t*, int, int16_t*, uint8_t*,
+  sf_t*, int, int
+);
+
 template void run_reorder_x_bf16_nvfp4<16, 4096>(
   bf16_t*, int, int16_t*, uint8_t*,
   sf_t*, int, int
