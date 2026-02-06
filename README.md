@@ -97,6 +97,4 @@ Our code is built on the following repos, thank you for your contributions to co
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer/tree/main)
 - [CUTLASS](https://github.com/NVIDIA/cutlass)
 - [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-- [MicroMix](https://github.com/EleutherAI/lm-evaluation-harness)
-
 
