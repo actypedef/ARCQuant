@@ -24,7 +24,7 @@ To do:
 - [x] Support [vLLM](https://github.com/vllm-project/vllm) integration.
 - [ ] **Model Support**: Add support for more model families:
     - [ ] Qwen3
-    - [ ] Mixtral
+    - [x] Mixtral
     - [ ] Wan2.2
 
 

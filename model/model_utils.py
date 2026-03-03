@@ -9,6 +9,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer
 from qLinearLayer import find_qlinear_layers
 from qLlamaLayer import QLlamaDecoderLayer
 from qQwenLayer import QQwen2DecoderLayer
+from qMixtralLayer import QMixtralDecoderLayer
 
 
 from functools import partial
@@ -74,3 +75,28 @@ def reorder_model_qwen(model, device, kv_cache, reorder_index, select_nums, quan
         torch.cuda.empty_cache()
     return model
 
+def reorder_model_mixtral(model, device, kv_cache, reorder_index, select_nums, quant_type):
+    model.config.use_cache = False
+    layers = model.model.layers
+    assert reorder_index is not None, "Reorder index is None"
+
+    for i in tqdm(range(len(layers))):
+        layers[i] = layers[i].to(device)
+        if isinstance(layers[i], MixtralDecoderLayer):
+            m = QMixtralDecoderLayer(
+                originalLayer=layers[i],
+                kv_cache=kv_cache,
+                select_nums=select_nums,
+                reorder_index=reorder_index,
+                layer_idx=i,
+                quant_type=quant_type
+            )
+        elif isinstance(layers[i], QMixtralDecoderLayer):
+            m = layers[i]
+            
+
+        layers[i] = layers[i].cpu()
+        layers[i] = m.cpu()
+        del m
+        torch.cuda.empty_cache()
+    return model

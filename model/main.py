@@ -1,7 +1,7 @@
 import torch
 from collections import defaultdict
 
-from model_utils import reorder_model_llama, reorder_model_qwen
+from model_utils import reorder_model_llama, reorder_model_qwen, reorder_model_mixtral
 from parallel_utils import map_layers_to_multi_gpus
 from datautils import get_loaders
 from eval import *
@@ -35,6 +35,12 @@ def get_qwen(model):
         pass
     
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    model = AutoModelForCausalLM.from_pretrained(model, torch_dtype="auto")
+   
+    return model
+
+def get_mixtral(model):
+    from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(model, torch_dtype="auto")
    
     return model
@@ -103,6 +109,10 @@ if __name__ == '__main__':
     elif "qwen" in args.model.lower():
         model = get_qwen(args.model)
         reorder_model_func = reorder_model_qwen
+    
+    elif "mixtral" in args.model.lower():
+        model = get_mixtral(args.model)
+        reorder_model_func = reorder_model_mixtral
        
     model.eval()
 
@@ -125,9 +135,9 @@ if __name__ == '__main__':
     torch.cuda.reset_max_memory_allocated()
     print("Reordering model...")
     start_time=time.time()
-    model = reorder_model_func(
-        model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums, quant_type=args.quant_type
-    )
+    # model = reorder_model_func(
+    #     model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums, quant_type=args.quant_type
+    # )
     end_time=time.time()
     peak_memory = torch.cuda.max_memory_allocated()
 
@@ -139,7 +149,7 @@ if __name__ == '__main__':
     bsz = "auto"
     if args.tasks is not None:
         if 'mmlu' in args.tasks :
-            bsz = 4
+            bsz = 2
  
     from transformers import AutoTokenizer
     lm = HFLM(model, batch_size=bsz)

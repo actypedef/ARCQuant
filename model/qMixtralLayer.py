@@ -1,8 +1,10 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 from typing import List, Optional, Tuple
 import math
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaAttention, LlamaMLP
+from tqdm import tqdm
+from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer, MixtralRMSNorm, MixtralAttention, MixtralSparseMoeBlock, MixtralBlockSparseTop2MLP
 from qLinearLayer import QLinearLayer
 from quantize import *
 from visualize import *
@@ -33,7 +35,7 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -41,8 +43,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         k (`torch.Tensor`): The key tensor.
         cos (`torch.Tensor`): The cosine part of the rotary embedding.
         sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
+        position_ids (`torch.Tensor`):
+            The position indices of the tokens corresponding to the query and key tensors. For example, this can be
+            used to pass offsetted position ids when working with a KV-cache.
         unsqueeze_dim (`int`, *optional*, defaults to 1):
             The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
             sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
@@ -53,8 +56,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
+    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -70,35 +73,34 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+
 def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     scale = torch.max(x.abs()).float() / (448.0*6.0)
-    # scale = 1.0
     qx, scale_x = agemm.reorder_quantize_x(x/scale, reorder_index, select_num)
     return qx, scale_x, scale
-
+    
 def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
     if quant_type == 'NVFP4':
-        return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
-        # return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+        # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
+        return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     else:
         index = reorder_index.to(torch.int32)
-        return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
-        # return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
+        return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
 
-class QLlamaDecoderLayer(nn.Module):
+class QMixtralDecoderLayer(nn.Module):
     def __init__(
         self,
-        originalLayer: LlamaDecoderLayer,
+        originalLayer: MixtralDecoderLayer,
         kv_cache,
         select_nums,
         reorder_index,
         layer_idx,
-        quant_type,
+        quant_type
     ):
         super().__init__()
        
         self.hidden_size = originalLayer.hidden_size
-        self.self_attn = QLlamaAttention(
+        self.self_attn = QMixtralAttention(
             originalLayer.self_attn,
             kv_cache,
             select_nums=select_nums,
@@ -107,29 +109,29 @@ class QLlamaDecoderLayer(nn.Module):
             quant_type=quant_type
         )
         # self.self_attn = originalLayer.self_attn
-        self.mlp = QLlamaMLP(
-            originalLayer.mlp,
+        self.block_sparse_moe = QMixtralSparseMoeBlock(
+            originalLayer.block_sparse_moe,
             select_nums=select_nums,
             reorder_index=reorder_index,
             i=layer_idx,
             quant_type=quant_type
         )
         # self.mlp = originalLayer.mlp
-        self.input_layernorm = QLlamaRMSNorm(
+        self.input_layernorm = QMixtralRMSNorm(
             originalLayer.input_layernorm, 
             
         )
-        self.post_attention_layernorm = QLlamaRMSNorm(
+        self.post_attention_layernorm = QMixtralRMSNorm(
             originalLayer.post_attention_layernorm, 
             
         )
 
     def to(self, *args, **kwargs):
-        super(QLlamaDecoderLayer, self).to(*args, **kwargs)
+        super(QMixtralDecoderLayer, self).to(*args, **kwargs)
         self.self_attn = self.self_attn.to(*args, **kwargs)
         self.input_layernorm = self.input_layernorm.to(*args, **kwargs)
         self.post_attention_layernorm = self.post_attention_layernorm.to(*args, **kwargs)
-        self.mlp = self.mlp.to(*args, **kwargs)
+        self.block_sparse_moe = self.block_sparse_moe.to(*args, **kwargs)
         return self
 
     @torch.no_grad()
@@ -140,9 +142,10 @@ class QLlamaDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
+        output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        position_embeddings = None
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
 
@@ -164,7 +167,7 @@ class QLlamaDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -175,14 +178,17 @@ class QLlamaDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
+        if output_router_logits:
+            outputs += (router_logits,)
+            
         return outputs
     
    
         
-class QLlamaRMSNorm(nn.Module):
+class QMixtralRMSNorm(nn.Module):
     def __init__(
         self,
-        originalNorm: LlamaRMSNorm,
+        originalNorm: MixtralRMSNorm,
     ):
         super().__init__()
         self.originalNorm = originalNorm
@@ -200,16 +206,17 @@ class QLlamaRMSNorm(nn.Module):
         return result
     
     def to(self, *args, **kwargs):
-        super(QLlamaRMSNorm, self).to(*args, **kwargs)
+        super(QMixtralRMSNorm, self).to(*args, **kwargs)
         self.originalNorm = self.originalNorm.to(*args, **kwargs)
        
         return self
 
-class QLlamaAttention(nn.Module):
+class QMixtralAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self, 
-        originalAttn: LlamaAttention,
+        originalAttn: MixtralAttention,
         kv_cache,
         select_nums,
         reorder_index,
@@ -217,6 +224,9 @@ class QLlamaAttention(nn.Module):
         quant_type
     ):
         super().__init__()
+
+        self.layer_idx = i
+        self.quant_type = quant_type
         self.q_kv_cache = kv_cache
         self.config = originalAttn.config
         self.hidden_size = originalAttn.hidden_size
@@ -227,7 +237,6 @@ class QLlamaAttention(nn.Module):
         self.max_position_embeddings = originalAttn.max_position_embeddings
         self.rope_theta = originalAttn.rope_theta
         self.layer_idx = i
-        self.quant_type = quant_type
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -259,21 +268,24 @@ class QLlamaAttention(nn.Module):
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
             quant_type=quant_type
         )
+        self.register_buffer('q_reorder_index', reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')].to(torch.int16))
+        self.register_buffer('o_reorder_index', reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')].to(torch.int16))
+        
         self.rotary_emb = originalAttn.rotary_emb
-
-
         self.attention_dropout=originalAttn.attention_dropout
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def to(self, *args, **kwargs):
-        super(QLlamaAttention, self).to(*args, **kwargs)
+        super(QMixtralAttention, self).to(*args, **kwargs)
         self.q_proj = self.q_proj.to(*args, **kwargs)
         self.k_proj = self.k_proj.to(*args, **kwargs)
         self.v_proj = self.v_proj.to(*args, **kwargs)
         self.o_proj = self.o_proj.to(*args, **kwargs)
         self.rotary_emb = self.rotary_emb.to(*args, **kwargs)
+        self.q_reorder_index = self.q_reorder_index.to(*args, **kwargs)
+        self.o_reorder_index = self.o_reorder_index.to(*args, **kwargs)
       
         return self
 
@@ -294,6 +306,7 @@ class QLlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         
         hidden_states = hidden_states.reshape(bsz*q_len, -1).contiguous().detach()
+        
         qx, scale_x, scale = reorder_quantize_x(hidden_states, self.q_reorder_index, self.q_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         
@@ -302,23 +315,25 @@ class QLlamaAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # kv_seq_len = key_states.shape[-2]
-        # if past_key_value is not None:
-        #     kv_seq_len += past_key_value[0].shape[-2]
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         
         # Fake quantize the key_states.
         # Preserve the position embedding info by first quantize.
-        if self.q_kv_cache:
-            key_states = quantize_int_group(key_states, nbits=4, group_size=64)
+        
         
         # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         if position_embeddings is None:
-            cos, sin = self.rotary_emb(value_states, position_ids)
+            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
          
         else:
             cos, sin = position_embeddings
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if self.q_kv_cache:
+            key_states = quantize_int_group(key_states, nbits=4, group_size=128)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        
         # [bsz, nh, t, hd]
 
         if past_key_value is not None:
@@ -336,7 +351,7 @@ class QLlamaAttention(nn.Module):
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
             
         if self.q_kv_cache:
-            value_states = quantize_int_group(value_states, nbits=4, group_size=64)
+            value_states = quantize_int_group(value_states, nbits=4, group_size=128)
             
             
         if query_states.device.type == "cuda" and causal_mask is not None:
@@ -360,7 +375,6 @@ class QLlamaAttention(nn.Module):
       
         attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
 
-
         qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
@@ -370,74 +384,160 @@ class QLlamaAttention(nn.Module):
             attn_weights = None
         
         return attn_output, attn_weights, past_key_value
-    
 
-class QLlamaMLP(nn.Module):
+class QMixtralSparseMoeBlock(nn.Module):
+    """
+    This implementation is
+    strictly equivalent to standard MoE with full capacity (no
+    dropped tokens). It's faster since it formulates MoE operations
+    in terms of block-sparse operations to accomodate imbalanced
+    assignments of tokens to experts, whereas standard MoE either
+    (1) drop tokens at the cost of reduced performance or (2) set
+    capacity factor to number of experts and thus waste computation
+    and memory on padding.
+    """
+
     def __init__(
-        self,
-        originalMLP: LlamaMLP,
+        self, 
+        originalSparseMoeBlock: MixtralSparseMoeBlock,
         select_nums,
         reorder_index,
         i,
         quant_type
     ):
         super().__init__()
-        nameTemplate = 'layers.{}.{}.{}.{}'
+        self.hidden_dim = originalSparseMoeBlock.hidden_dim
+        self.ffn_dim = originalSparseMoeBlock.ffn_dim
+        self.num_experts = originalSparseMoeBlock.num_experts
+        self.top_k = originalSparseMoeBlock.top_k
 
+
+
+        nameTemplate = 'layers.{}.{}.{}.{}'
+        self.gate = originalSparseMoeBlock.gate
+
+        self.experts = originalSparseMoeBlock.experts
+
+        for j in range(self.num_experts):
+            self.experts[j] = QMixtralBlockSparseTop2MLP(originalSparseMoeBlock.experts[j], select_nums, reorder_index, i, j, quant_type)
+
+        # Jitter parameters
+        # self.jitter_noise = originalSparseMoeBlock.router_jitter_noise
+
+    def to(self, *args, **kwargs):
+        super(QMixtralSparseMoeBlock, self).to(*args, **kwargs)
+        self.gate = self.gate.to(*args, **kwargs)
+        self.experts = self.experts.to(*args, **kwargs)
+    
+        
+        return self
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """ """
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (batch * sequence_length, n_experts)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # we cast back to the input dtype
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            if top_x.numel() == 0:  # numel() 返回元素总数，0表示空
+                continue  
+            # Index the correct hidden states and compute the expert hidden state for
+            # the current expert. We need to make sure to multiply the output hidden
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+    
+class QMixtralBlockSparseTop2MLP(nn.Module):
+    def __init__(self, 
+                originalBlock: MixtralBlockSparseTop2MLP,
+                select_nums,
+                reorder_index,
+                layer_idx,
+                moe_idx,
+                quant_type
+            ):
+        super().__init__()
+        self.ffn_dim = originalBlock.ffn_dim
+        self.hidden_dim = originalBlock.hidden_dim
+
+        nameTemplate = 'layers.{}.{}.{}.{}.{}.{}'
         self.quant_type = quant_type
-        
-        self.gate_proj = QLinearLayer(
-            originalMLP.gate_proj,
-            select_num=select_nums[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
-            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=self.quant_type
+        self.w1 = QLinearLayer(
+            originalBlock.w1,
+            select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')],
+            reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')],
+            quant_type=quant_type
         )
-        self.down_proj = QLinearLayer(
-            originalMLP.down_proj,
-            select_num=select_nums[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=self.quant_type
+        self.w3 = QLinearLayer(
+            originalBlock.w3,
+            select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w3', 'input')],
+            reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w3', 'input')],
+            quant_type=quant_type
         )
-        self.up_proj = QLinearLayer(
-            originalMLP.up_proj,
-            select_num=select_nums[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
-            reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
-            out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=self.quant_type
+        self.w2 = QLinearLayer(
+            originalBlock.w2,
+            select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')],
+            reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')],
+            quant_type=quant_type
         )
-        self.act_fn = originalMLP.act_fn
-        self.layer_idx = i
-        
+        self.register_buffer('w1_reorder_index', reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')].to(torch.int16))
+        self.register_buffer('w2_reorder_index', reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')].to(torch.int16))
+
+        self.act_fn = originalBlock.act_fn
         
     def to(self, *args, **kwargs):
-        super(QLlamaMLP, self).to(*args, **kwargs)
-        self.gate_proj = self.gate_proj.to(*args, **kwargs)
-        self.down_proj = self.down_proj.to(*args, **kwargs)
-        self.up_proj = self.up_proj.to(*args, **kwargs)
+        super(QMixtralBlockSparseTop2MLP, self).to(*args, **kwargs)
+        self.w1 = self.w1.to(*args, **kwargs)
+        self.w2 = self.w2.to(*args, **kwargs)
+        self.w3 = self.w3.to(*args, **kwargs)
+        self.w2_reorder_index = self.w2_reorder_index.to(*args, **kwargs)
+        self.w1_reorder_index = self.w1_reorder_index.to(*args, **kwargs)
         
-
         return self
 
     @torch.no_grad()
     def forward(self, x):
         # input X: [b, seq, dim]: quantized
+        q_len, _ = x.shape
+        # print(f"x = {x.shape}")
+        # x = x.reshape(bsz*q_len, -1).contiguous().detach()
 
-        bsz, q_len, _ = x.shape
-        x = x.reshape(bsz*q_len, -1).contiguous().detach()
-
-        qx, scale_x, scale = reorder_quantize_x(x, self.up_reorder_index, self.up_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(x, self.w1_reorder_index, self.w1.select_num, self.quant_type)
         torch.cuda.synchronize()
-        x = (qx, scale_x, scale, bsz, q_len)
-        tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        x = (qx, scale_x, scale, None, q_len)
+        # print(f"qx = {qx.shape}")
+        tmpResult = self.act_fn(self.w1(x)) * self.w3(x)
         # Quantize the activations and feed into down_proj
+        # bsz, q_len, _ = tmpResult.shape
+        # tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
 
-        bsz, q_len, _ = tmpResult.shape
-        tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
-        
-
-        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.down_reorder_index, self.down_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.w2_reorder_index, self.w2.select_num, self.quant_type)
         torch.cuda.synchronize()
-        tmpResult = (qx, scale_x, scale, bsz, q_len)
+        tmpResult = (qx, scale_x, scale, None, q_len)
        
-        return self.down_proj(tmpResult)
+        return self.w2(tmpResult)

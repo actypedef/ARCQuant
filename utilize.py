@@ -137,6 +137,7 @@ def get_act_stats(model, dataloader, device_, metric='mean', seqlen=2048, reorde
     
     for layer_idx, layer in enumerate(model.model.layers):
         
+
         attn_block = layer.self_attn
         
         qkv_weight_combined = torch.cat([
@@ -147,7 +148,9 @@ def get_act_stats(model, dataloader, device_, metric='mean', seqlen=2048, reorde
         
         for proj_name, proj_module in [('q_proj', attn_block.q_proj), ('k_proj', attn_block.k_proj), ('v_proj', attn_block.v_proj)]:
             name = f'layers.{layer_idx}.self_attn.{proj_name}'
-            index = reorder_index[nameTemplate.format(layer_idx, 'self_attn', proj_name, 'input')].cuda().to(torch.int32) if reorder_index is not None else None
+            index_key = nameTemplate.format(layer_idx, 'self_attn', proj_name, 'input')
+            index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+            
             hooks.append(
                 proj_module.register_forward_hook(
                     functools.partial(stat_input_hook, name=name, weight_for_input_stat=qkv_weight_combined, reorder_index=index)
@@ -156,38 +159,93 @@ def get_act_stats(model, dataloader, device_, metric='mean', seqlen=2048, reorde
             
         o_proj_name = f'layers.{layer_idx}.self_attn.o_proj'
         o_proj_weight_for_hook = attn_block.o_proj.weight.data if 'o_proj' in o_proj_name and metric == 'frobenius' else None
-        index = reorder_index[nameTemplate.format(layer_idx, 'self_attn', 'o_proj', 'input')].cuda().to(torch.int32) if reorder_index is not None else None
+        
+        index_key = nameTemplate.format(layer_idx, 'self_attn', 'o_proj', 'input')
+        index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+        
         hooks.append(
             attn_block.o_proj.register_forward_hook(
                 functools.partial(stat_input_hook, name=o_proj_name, weight_for_input_stat=o_proj_weight_for_hook, reorder_index=index)
             )
         )
         
-        mlp_block = layer.mlp
         
-        gate_up_weight_combined = torch.cat([
-            mlp_block.gate_proj.weight.data, 
-            mlp_block.up_proj.weight.data
-        ], dim=0).to(device=device, non_blocking=True)
-        
-        for proj_name, proj_module in [('gate_proj', mlp_block.gate_proj), ('up_proj', mlp_block.up_proj)]:
-            name = f'layers.{layer_idx}.mlp.{proj_name}'
-            nameTemplate = 'layers.{}.{}.{}.{}'
-            index = reorder_index[nameTemplate.format(layer_idx, 'mlp', proj_name, 'input')].cuda().to(torch.int32) if reorder_index is not None else None
+        if hasattr(layer, 'block_sparse_moe'):
+            moe_block = layer.block_sparse_moe
+            
+            gate_layer = moe_block.gate
+            gate_name = f'layers.{layer_idx}.block_sparse_moe.gate'
+            
+            index_key = f"{gate_name}.input" 
+            index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+    
             hooks.append(
-                proj_module.register_forward_hook(
-                    functools.partial(stat_input_hook, name=name, weight_for_input_stat=gate_up_weight_combined, reorder_index=index)
+                gate_layer.register_forward_hook(
+                    functools.partial(stat_input_hook, name=gate_name, weight_for_input_stat=gate_layer.weight.data, reorder_index=index)
                 )
             )
-        
-        down_proj_name = f'layers.{layer_idx}.mlp.down_proj'
-        down_proj_weight_for_hook = mlp_block.down_proj.weight.data if 'down_proj' in down_proj_name and metric == 'frobenius' else None
-        index = reorder_index[nameTemplate.format(layer_idx, 'mlp', 'down_proj', 'input')].cuda().to(torch.int32) if reorder_index is not None else None
-        hooks.append(
-            mlp_block.down_proj.register_forward_hook(
-                functools.partial(stat_input_hook, name=down_proj_name, weight_for_input_stat=down_proj_weight_for_hook, reorder_index=index)
+    
+            for expert_idx, expert in enumerate(moe_block.experts):
+
+                gate_up_weight_combined = torch.cat([
+                    expert.w1.weight.data, 
+                    expert.w3.weight.data
+                ], dim=0).to(device=device, non_blocking=True)
+                
+                for proj_name, proj_module in [('w1', expert.w1), ('w3', expert.w3)]:
+                    name = f'layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{proj_name}'
+                    
+                    index_key = f"{name}.input"
+                    index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+    
+                    hooks.append(
+                        proj_module.register_forward_hook(
+                            functools.partial(stat_input_hook, name=name, weight_for_input_stat=gate_up_weight_combined, reorder_index=index)
+                        )
+                    )
+    
+                down_proj_name = f'layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2'
+                down_proj_weight_for_hook = expert.w2.weight.data if metric == 'frobenius' else None
+                
+                index_key = f"{down_proj_name}.input"
+                index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+    
+                hooks.append(
+                    expert.w2.register_forward_hook(
+                        functools.partial(stat_input_hook, name=down_proj_name, weight_for_input_stat=down_proj_weight_for_hook, reorder_index=index)
+                    )
+                )
+    
+        elif hasattr(layer, 'mlp'):
+            mlp_block = layer.mlp
+            
+            gate_up_weight_combined = torch.cat([
+                mlp_block.gate_proj.weight.data, 
+                mlp_block.up_proj.weight.data
+            ], dim=0).to(device=device, non_blocking=True)
+            
+            for proj_name, proj_module in [('gate_proj', mlp_block.gate_proj), ('up_proj', mlp_block.up_proj)]:
+                name = f'layers.{layer_idx}.mlp.{proj_name}'
+                index_key = nameTemplate.format(layer_idx, 'mlp', proj_name, 'input')
+                index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+                
+                hooks.append(
+                    proj_module.register_forward_hook(
+                        functools.partial(stat_input_hook, name=name, weight_for_input_stat=gate_up_weight_combined, reorder_index=index)
+                    )
+                )
+            
+            down_proj_name = f'layers.{layer_idx}.mlp.down_proj'
+            down_proj_weight_for_hook = mlp_block.down_proj.weight.data if 'down_proj' in down_proj_name and metric == 'frobenius' else None
+            
+            index_key = nameTemplate.format(layer_idx, 'mlp', 'down_proj', 'input')
+            index = reorder_index[index_key].cuda().to(torch.int32) if (reorder_index is not None and index_key in reorder_index) else None
+            
+            hooks.append(
+                mlp_block.down_proj.register_forward_hook(
+                    functools.partial(stat_input_hook, name=down_proj_name, weight_for_input_stat=down_proj_weight_for_hook, reorder_index=index)
+                )
             )
-        )
 
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(device)
@@ -391,111 +449,130 @@ def search_select_proportions(model, dataloader, device_, seqlen, reorder_index)
     
     select_nums = {}
     average_bits = {}
-   
-    def stat_input_hook(m, x, y, name):
-        if isinstance(x, tuple):
-            x = x[0]
-            assert isinstance(x, torch.Tensor)
-        if isinstance(y, tuple):
-            y = y[0]
-            assert isinstance(y, torch.Tensor)
-        act_scales[name+".input"] = x
-        act_scales[name+".output"] = y
-     
-    hooks = []
-    for name, m in model.model.named_modules():
-        if isinstance(m, nn.Linear):
-            hooks.append(
-                m.register_forward_hook(
-                    functools.partial(stat_input_hook, name=name)
-                )
-            )
-
+    
+    print("Preparing inputs...")
     layers = model.model.layers
     
-    model.to(device)
+    if hasattr(model.model, "embed_tokens"):
+        model.model.embed_tokens = model.model.embed_tokens.to(device)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(device)
     
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=device
-    )
-    cache = {'attention_mask': None}
-
+    
+    cache = {'attention_mask': None, 'position_ids': None}
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            self.self_attn = module.self_attn
         def forward(self, inp, **kwargs):
             cache['inps'] = inp
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
-            raise ValueError
+            cache['attention_mask'] = kwargs.get('attention_mask')
+            cache['position_ids'] = kwargs.get('position_ids')
+            raise ValueError 
+            
     layers[0] = Catcher(layers[0])
-
-    dataloader = torch.stack(dataloader, dim=0).squeeze(1)
+    
+    if isinstance(dataloader, list):
+         dataloader = torch.stack(dataloader, dim=0).squeeze(1)
     
     try:
-        model(torch.tensor(dataloader).to(device))
+        model(dataloader.to(device))
     except ValueError:
-        pass
-    
+        pass 
     
     layers[0] = layers[0].module
-    layers[0] = layers[0].cpu()
-    model.cpu()
-
+    if hasattr(model.model, "embed_tokens"):
+        model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+        
     torch.cuda.empty_cache()
 
     inps = cache['inps']
-  
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
-
+    
     total_elements = 0
     total_bits = 0
-  
+
+    def stat_input_hook(m, x, y, name, act_scales_dict):
+        if isinstance(x, tuple):
+            x = x[0]
+        if isinstance(y, tuple):
+            y = y[0]
+        act_scales_dict[name + ".input"] = x 
+        # act_scales_dict[name + ".output"] = y 
+
+    print("Processing layers...")
     for i in tqdm(range(len(layers))):
-        act_scales = {}
-        layer = layers[i].to(device)
-  
-        inps = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
-       
+        layer = layers[i]
+        layer = layer.to(device) 
+        
+        act_scales = {} 
+        hooks = []
+        
+        layer_prefix = f"layers.{i}"
+        
+        for name, m in layer.named_modules():
+            if isinstance(m, nn.Linear):
+                full_name = f"{layer_prefix}.{name}"
+                hooks.append(
+                    m.register_forward_hook(
+                        functools.partial(stat_input_hook, name=full_name, act_scales_dict=act_scales)
+                    )
+                )
+
+        inps = inps.to(device)
+        if attention_mask is not None: attention_mask = attention_mask.to(device)
+        if position_ids is not None: position_ids = position_ids.to(device)
+
+        with torch.no_grad():
+            inps = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
+
         for name, keys in act_scales.items():
             if 'output' in name:
                 continue
-                
+            
             keys = keys.reshape(-1, keys.shape[-1]).contiguous()
-            seqlen, in_features = keys.shape 
-            keys = keys[:, reorder_index[name].to(torch.int32)]
-       
+            seqlen_dim, in_features = keys.shape
+            
+            if name in reorder_index:
+                idx = reorder_index[name].to(device).to(torch.int32) 
+                keys = keys[:, idx]
+            else:
+                print(f"Warning: {name} not found in reorder_index")
+                continue
+
             threshold = keys.max(dim=-1, keepdim=True)[0] * 0.125
-     
             select_ratio = (keys > threshold).sum() / keys.numel()
             select_num = math.ceil(in_features * select_ratio / 64) * 64
-            select_ratio = select_num / in_features
-            average_bits[name] = 4.5 * (in_features + select_num) / in_features
+            
+            if select_num > in_features: select_num = in_features
+            
+            select_ratio_val = select_num / in_features
+            avg_bits = 4.5 * (in_features + select_num) / in_features
+            
+            average_bits[name] = avg_bits
+            select_nums[name] = select_num
+            
             total_elements += in_features
             total_bits += 4.5 * (in_features + select_num)
-            print(f'{name}: {select_ratio*100:.2f}%, avg:{average_bits[name]:.2f}')
-            select_nums[name] = select_num
-                
             
-            del keys
+            print(f'{name}: {select_ratio_val*100:.2f}%, avg:{avg_bits:.2f}')
             
-            gc.collect()
-            torch.cuda.empty_cache()
+            del keys 
+
+        for h in hooks:
+            h.remove()
         
-        
-        layer.cpu()
         del act_scales
-        del layer
+        del hooks
+        
+        layer = layer.cpu() 
         gc.collect()
         torch.cuda.empty_cache()
 
-    for h in hooks:
-        h.remove()
-        
-    print(f'average bits is {(total_bits / total_elements):.2f}')
+    print(f'Average bits is {(total_bits / total_elements):.2f}')
     return select_nums, average_bits
 

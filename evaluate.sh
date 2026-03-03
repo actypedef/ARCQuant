@@ -5,6 +5,14 @@ MODEL=${1}
 dir=$(pwd)
 export CUDA_VISIBLE_DEVICE="0"
         
+# wikitext2 ppl
+python ${dir}/model/main.py ${MODEL}\
+        --act_sort_metric max\
+        --dataset wikitext2\
+        --lm_eval_limit -1\
+        --eval_ppl\
+        --quant_type NVFP4\
+
 
 # zero-shot
 python ${dir}/model/main.py ${MODEL} \
@@ -26,10 +34,4 @@ python ${dir}/model/main.py ${MODEL}\
         --quant_type NVFP4\
 
 
-# wikitext2 ppl
-python ${dir}/model/main.py ${MODEL}\
-        --act_sort_metric max\
-        --dataset wikitext2\
-        --lm_eval_limit -1\
-        --eval_ppl\
-        --quant_type NVFP4\
+

@@ -74,7 +74,10 @@ class QLinearLayer(nn.Module):
         if self.bias is not None:
             y = y + self.bias
 
-        y = y.reshape(bsz, q_len, -1)
+        if bsz is not None:
+            y = y.reshape(bsz, q_len, -1)
+        else:
+            y = y.reshape(q_len, -1)
         return y
 
     
