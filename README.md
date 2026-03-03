@@ -67,6 +67,8 @@ python reorder_indices.py --model /PATH/TO/YOUR/MODEL/ --samples 128 --seqlen 20
 Results are saved in ./saved/
 
 ### 2.3 Accuracy Evaluation
+
+ARCQuant supports multiple formats, including NVFP4, MXFP4, HiF4, and INT4. You can modify the `quant_type` parameter if needed.
 ```bash
 bash evaluate.sh /PATH/TO/YOUR/MODEL/
 ```
