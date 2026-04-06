@@ -78,8 +78,8 @@ def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
 
 def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
     if quant_type == 'NVFP4':
-        return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
-        # return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+        # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
+        return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     else:
         index = reorder_index.to(torch.int32)
         # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
