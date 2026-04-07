@@ -11,14 +11,14 @@
 
 **ARCQuant** is a high-performance quantization framework for low-bit LLMs that improves accuracy under fine-grained formats such as NVFP4, while preserving a unified and efficient inference pipeline.
 
-While fine-grained quantization formats such as NVFP4 effectively isolate quantization noise, activation outliers can still cause severe accuracy degradation in critical channels. Traditional mixed-precision methods address this issue by splitting computations into separate branches, which often introduces additional kernel launch overhead and memory fragmentation.
+While fine-grained quantization formats such as NVFP4 effectively isolate quantization noise, activation outliers can still cause severe accuracy degradation in critical channels. Traditional mixed-precision methods address this by splitting computations into separate branches, which introduces additional kernel launch overhead and memory fragmentation.
 
 ARCQuant takes a different approach. Instead of treating outliers as a separate computation path, we leverage the structural sparsity of quantization errors in fine-grained settings. We capture the quantization residuals of critical channels and fuse them back into the computation as **Augmented Residual Channels (ARC)**.
 
 ## News
 
 - [2026/04] 🏆 ARCQuant has been accepted to ACL 2026 Main Conference!
-- [2026/03] 🔥 ARCQuant has been integrated into NVIDIA [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/pull/11333), with engineering contributions from [Tracin](https://github.com/Tracin)!
+- [2026/03] 🔥 ARCQuant has been integrated into NVIDIA [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/pull/11333), with contributions from [Tracin](https://github.com/Tracin)!
 - [2026/01] 🔥 ARCQuant is publicly available on arXiv! Check our paper [here](https://arxiv.org/abs/2601.07475).
 
 ## To Do
