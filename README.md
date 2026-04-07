@@ -17,7 +17,7 @@ ARCQuant takes a different approach. Instead of treating outliers as a separate 
 
 ## News
 
-- [2026/04] 🏆 ARCQuant has been accepted to ACL 2026 Main Conference!
+- [2026/04] 🏆 ARCQuant has been accepted to **ACL 2026 Main Conference**!
 - [2026/03] 🔥 ARCQuant has been integrated into NVIDIA [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/pull/11333), with contributions from [Tracin](https://github.com/Tracin)!
 - [2026/01] 🔥 ARCQuant is publicly available on arXiv! Check our paper [here](https://arxiv.org/abs/2601.07475).
 
