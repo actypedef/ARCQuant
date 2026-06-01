@@ -3,11 +3,12 @@
 <h5 align="center">
 
 [![arXiv](https://img.shields.io/badge/ARCQuant-2601.07475-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2601.07475)
+[![Poster](https://img.shields.io/badge/Poster-ACL%202026-2179b5.svg)](assets/ARCQuant_ACL2026_A0_Poster.pdf)
 <br>
 
 </h5>
 
-![arcquant](kernels/ARCQuant_Visualize.png)
+![arcquant](assets/ARCQuant_Visualize.png)
 
 **ARCQuant** is a high-performance quantization framework for low-bit LLMs that improves accuracy under fine-grained formats such as NVFP4, while preserving a unified and efficient inference pipeline.
 
@@ -105,4 +106,3 @@ This project builds on several excellent open-source efforts. We sincerely thank
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer/tree/main)
 - [CUTLASS](https://github.com/NVIDIA/cutlass)
 - [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-
