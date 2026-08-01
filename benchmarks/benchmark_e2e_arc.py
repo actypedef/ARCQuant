@@ -74,6 +74,16 @@ MODEL_CFGS = {
             attention_bias=True,
             mlp_bias=True
         ),
+    "qwen3-8b":
+        ModelConfig(
+            name='qwen3-8b',
+            num_layers=36,
+            num_heads=28,
+            hidden_size=4096,
+            intermediate_size=14336,
+            attention_bias=False,
+            mlp_bias=False
+        ),
 }
 
 
