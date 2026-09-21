@@ -1,4 +1,4 @@
-# AGEMM for AURA
+# AGEMM for ARCQuant
 
 **AGEMM** is a NVFP4 GEMM with quantize and reorder kernel performed on Blackwell GPUs(RTX5090).
 
